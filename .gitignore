@@ -3,3 +3,9 @@ node_modules/
 *.tar.gz
 *.tgz
 preview*.png
+.next/
+out/
+.vercel/
+.env*
+!.env.example
+*.log
