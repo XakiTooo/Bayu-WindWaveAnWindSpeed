@@ -9,6 +9,9 @@ import {
   records,
   exportCsv,
   calculateStats,
+  calculateWindRose,
+  getDeviceHealth,
+  validateUserLogin,
   updateStationFromTelemetry,
   DEFAULT_SETTINGS
 } from '../src/lib/simulation.mjs';
@@ -120,4 +123,46 @@ test('calculateStats handles multi-direction distribution correctly', () => {
   assert.equal(stats.dominantDirection, 'Timur');
   assert.equal(stats.maxSpeed, 28);
   assert.equal(stats.avgSpeed, (12 + 14 + 28) / 3);
+});
+
+test('calculateWindRose produces 8-sector distribution correctly', () => {
+  const records = [
+    { speed: 10, angle: 0 },   // Utara
+    { speed: 20, angle: 0 },   // Utara
+    { speed: 15, angle: 90 },  // Timur
+    { speed: 25, angle: 180 }, // Selatan
+  ];
+  const rose = calculateWindRose(records);
+  assert.equal(rose.length, 8);
+  const utara = rose.find((r) => r.direction === 'Utara');
+  assert.equal(utara.count, 2);
+  assert.equal(utara.percentage, 50);
+  assert.equal(utara.avgSpeed, 15);
+});
+
+test('getDeviceHealth reflects online and offline states', () => {
+  const onlineStation = { online: true, source: 'mqtt' };
+  const offlineStation = { online: false, source: 'mqtt' };
+
+  const onlineHealth = getDeviceHealth(onlineStation);
+  assert.equal(onlineHealth.wifiStatus, 'Sangat Baik');
+  assert.equal(onlineHealth.as5600Status, 'Normal (Magnet OK)');
+
+  const offlineHealth = getDeviceHealth(offlineStation);
+  assert.equal(offlineHealth.wifiStatus, 'Terputus');
+  assert.equal(offlineHealth.as5600Status, 'Sensor Offline');
+});
+
+test('validateUserLogin handles default admin and stored accounts', () => {
+  const adminRes = validateUserLogin('admin', 'bayu0098');
+  assert.equal(adminRes.valid, true);
+  assert.equal(adminRes.user.role, 'admin');
+
+  const failRes = validateUserLogin('admin', 'wrongpass');
+  assert.equal(failRes.valid, false);
+
+  const stored = [{ username: 'adhafa', password: 'secret123', role: 'admin', name: 'Adhafa JP' }];
+  const customRes = validateUserLogin('adhafa', 'secret123', stored);
+  assert.equal(customRes.valid, true);
+  assert.equal(customRes.user.name, 'Adhafa JP');
 });
