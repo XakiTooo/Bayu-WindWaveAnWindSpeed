@@ -42,5 +42,76 @@ export function records(stations) {
 }
 
 export function exportCsv(rows) {
-  return ['timestamp,station_id,speed_kmh,direction_deg,battery_percent,latitude,longitude,data_type', ...rows.map((row) => [new Date(row.timestamp).toISOString(), row.id, row.speed.toFixed(2), row.angle.toFixed(1), row.battery, row.lat, row.lng, 'SIMULASI'].join(','))].join('\n');
+  return [
+    'timestamp,station_id,speed_kmh,direction_deg,battery_percent,latitude,longitude,data_type',
+    ...rows.map((row) => [
+      new Date(row.timestamp).toISOString(),
+      row.id,
+      Number(row.speed).toFixed(2),
+      Number(row.angle).toFixed(1),
+      row.battery ?? 100,
+      row.lat,
+      row.lng,
+      row.dataType || (row.source === 'mqtt' ? 'HARDWARE_REAL' : 'SIMULASI')
+    ].join(','))
+  ].join('\n');
+}
+
+export function calculateStats(recordsList) {
+  if (!recordsList || recordsList.length === 0) {
+    return { maxSpeed: 0, avgSpeed: 0, dominantDirection: '—', count: 0 };
+  }
+  let maxSpeed = 0;
+  let totalSpeed = 0;
+  const directionCounts = {};
+
+  for (const r of recordsList) {
+    const s = Number(r.speed) || 0;
+    if (s > maxSpeed) maxSpeed = s;
+    totalSpeed += s;
+    const dir = direction(r.angle);
+    directionCounts[dir] = (directionCounts[dir] || 0) + 1;
+  }
+
+  let dominantDirection = '—';
+  let highestCount = 0;
+  for (const [dir, count] of Object.entries(directionCounts)) {
+    if (count > highestCount) {
+      highestCount = count;
+      dominantDirection = dir;
+    }
+  }
+
+  return {
+    maxSpeed,
+    avgSpeed: totalSpeed / recordsList.length,
+    dominantDirection,
+    count: recordsList.length,
+  };
+}
+
+export function updateStationFromTelemetry(station, telemetry) {
+  if (!station || !telemetry) return station;
+  const isRecent = telemetry.status === 'recent';
+  const speed = Number.isFinite(telemetry.windSpeedKmh) ? telemetry.windSpeedKmh : station.speed;
+  const angle = Number.isFinite(telemetry.windDirectionDeg) ? telemetry.windDirectionDeg : station.angle;
+  const updated = telemetry.receivedAt || Date.now();
+  const lat = (typeof telemetry.lat === 'number' && telemetry.lat !== 0) ? telemetry.lat : station.lat;
+  const lng = (typeof telemetry.lng === 'number' && telemetry.lng !== 0)
+    ? telemetry.lng
+    : ((typeof telemetry.lon === 'number' && telemetry.lon !== 0) ? telemetry.lon : station.lng);
+  const samples = station.samples ? [...station.samples.slice(1), speed] : [speed];
+
+  return {
+    ...station,
+    speed,
+    angle,
+    lat,
+    lng,
+    updated,
+    online: isRecent,
+    samples,
+    source: telemetry.source || 'mqtt',
+    ageSeconds: telemetry.ageSeconds,
+  };
 }
