@@ -9,24 +9,26 @@ const headers = {
   'Content-Type': 'application/json',
 };
 
-function authorized(request, bodyKey) {
-  const secret = process.env.BAYU_TELEMETRY_SHARE_KEY || 'KMNiJswfC6n3aPt-djSIqwMajSMzLhpz';
-  const supplied = bodyKey || new URL(request.url).searchParams.get('key');
-  if (!secret || !supplied || secret.length !== supplied.length) return false;
+function authorized(request) {
+  const secret = process.env.BAYU_COMMAND_SECRET;
+  const supplied = request.headers.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
+  if (!secret || secret === process.env.BAYU_TELEMETRY_SHARE_KEY || !supplied) return false;
   const expected = Buffer.from(secret);
   const actual = Buffer.from(supplied);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 export async function POST(request) {
-  try {
-    const body = await request.json();
-    const { action, stationId = 'angin-01', key, payload = {} } = body;
+  if (!authorized(request)) {
+    return Response.json({ error: 'Kunci perintah tidak valid.' }, { status: 403, headers });
+  }
 
-    // Check authorization
-    if (!authorized(request, key)) {
-      return Response.json({ error: 'Otorisasi tidak sah. Diperlukan akses admin.' }, { status: 403, headers });
+  try {
+    const { action, stationId: target = 'angin-01', payload = {} } = await request.json();
+    if (typeof target !== 'string' || !/^[a-z0-9-]{1,64}$/i.test(target)) {
+      return Response.json({ error: 'ID stasiun tidak valid.' }, { status: 400, headers });
     }
+    const stationId = target.toLowerCase();
 
     const validActions = ['calibrate_zero', 'buzzer_mute', 'buzzer_unmute', 'request_telemetry', 'reboot'];
     if (!validActions.includes(action)) {
@@ -47,12 +49,13 @@ export async function POST(request) {
       const db = getDatabase(getDashboardAdminApp());
       await db.ref(`stations/${stationId}/commands`).push(commandEntry);
     } catch (fbErr) {
-      console.warn('Firebase DB offline or not configured for commands, queued in memory:', fbErr.message);
+      console.error('BAYU command queue failed:', fbErr.code ?? fbErr.name);
+      return Response.json({ error: 'Antrean perintah belum tersedia.' }, { status: 503, headers });
     }
 
     return Response.json({
       success: true,
-      message: `Perintah [${action}] berhasil dikirim ke stasiun ${stationId}.`,
+      message: `Perintah [${action}] masuk antrean stasiun ${stationId}.`,
       command: commandEntry,
     }, { headers });
   } catch (error) {

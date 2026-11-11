@@ -32,7 +32,7 @@ const initial = {
   history: [],
   dataSource: 'simulation',
   soundAlert: true,
-  shareKey: 'KMNiJswfC6n3aPt-djSIqwMajSMzLhpz',
+  shareKey: '',
   liveStatus: 'idle',
   user: { username: 'guest', role: 'guest', name: 'Tamu Publik' },
   externalWeather: null,
@@ -50,7 +50,7 @@ function reducer(model, action) {
         history: records(stations),
         dataSource: action.dataSource || 'simulation',
         soundAlert: action.soundAlert ?? true,
-        shareKey: action.shareKey || 'KMNiJswfC6n3aPt-djSIqwMajSMzLhpz',
+        shareKey: action.shareKey || '',
         user: action.user || { username: 'guest', role: 'guest', name: 'Tamu Publik' },
         telegramConfig: action.telegramConfig || { botToken: '', chatId: '', enabled: false },
       };
@@ -173,7 +173,7 @@ export default function MapDashboard() {
   const [clock, setClock] = useState(null), [toast, setToast] = useState('');
   const [focusRequest, setFocusRequest] = useState(0), [fitRequest, setFitRequest] = useState(0);
   const [threshold, setThreshold] = useState(40), [batteryThreshold, setBatteryThreshold] = useState(20);
-  const [shareKeyInput, setShareKeyInput] = useState('KMNiJswfC6n3aPt-djSIqwMajSMzLhpz');
+  const [shareKeyInput, setShareKeyInput] = useState('');
   const [dismissedAlarm, setDismissedAlarm] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
@@ -194,7 +194,7 @@ export default function MapDashboard() {
     let saved = DEFAULT_SETTINGS;
     let savedSource = 'simulation';
     let savedSound = true;
-    let savedKey = 'KMNiJswfC6n3aPt-djSIqwMajSMzLhpz';
+    let savedKey = '';
     let savedUser = { username: 'guest', role: 'guest', name: 'Tamu Publik' };
     let savedTg = { botToken: '', chatId: '', enabled: false };
 
@@ -244,6 +244,10 @@ export default function MapDashboard() {
 
   useEffect(() => {
     if (dataSource !== 'live') return;
+    if (!shareKey) {
+      dispatch({ type: 'set_live_status', status: 'error' });
+      return;
+    }
     let active = true;
     const poll = async () => {
       try {
@@ -405,15 +409,17 @@ export default function MapDashboard() {
       return;
     }
     const targetId = station?.id || 'angin-01';
+    const commandKey = window.prompt('Masukkan kunci perintah stasiun.')?.trim();
+    if (!commandKey) return;
     setToast(`Mengirim perintah [${action}] ke ${targetId}…`);
     try {
       const res = await fetch('/api/command', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action, stationId: targetId, key: shareKey }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${commandKey}` },
+        body: JSON.stringify({ action, stationId: targetId }),
       });
       const data = await res.json();
-      const logLine = `[${new Date().toLocaleTimeString('id-ID')}] ${action} -> ${data.success ? 'TERKIRIM (ACK)' : 'GAGAL'}`;
+      const logLine = `[${new Date().toLocaleTimeString('id-ID')}] ${action} -> ${data.success ? 'MASUK ANTREAN' : 'GAGAL'}`;
       setCommandLogs((prev) => [logLine, ...prev].slice(0, 10));
       if (data.success) {
         setToast(data.message || 'Perintah berhasil diproses.');

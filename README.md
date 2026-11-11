@@ -138,7 +138,8 @@ Untuk menghubungkan broker EMQX Cloud ke database Firebase:
 | Item | Nilai Default | Keterangan |
 |---|---|---|
 | **Akun Admin Dashboard** | User: `admin` \| Password: `bayu0098` | Akses penuh kontrol downlink & pengaturan |
-| **API Telemetry Share Key** | `KMNiJswfC6n3aPt-djSIqwMajSMzLhpz` | Kunci otorisasi akses `/api/check-data` |
+| **API Telemetry Share Key** | `BAYU_TELEMETRY_SHARE_KEY` | Kunci baca untuk `/api/check-data`, diisi pada pengaturan Live dashboard |
+| **Command Secret** | `BAYU_COMMAND_SECRET` | Kunci server terpisah untuk mengantrekan perintah stasiun |
 | **Broker MQTT** | `g916bd01.ala.us-east-1.emqxsl.com` | EMQX Cloud Server |
 | **Port MQTT** | `8883` (TLS) / `8084` (WSS) | Enkripsi aman TLS v1.2/v1.3 |
 | **Topik Telemetri** | `bayu/stations/angin-01/telemetry` | Jalur publikasi data alat |
