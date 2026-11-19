@@ -26,12 +26,20 @@ function parseTelemetry(topic, payload) {
   }
 
   if (!data || data.stationId !== stationId) return null;
-  const { windSpeedKmh, windDirectionDeg } = data;
+  const { windSpeedKmh, windDirectionDeg, gps, lat, lon, lng } = data;
   if (!Number.isFinite(windSpeedKmh) || windSpeedKmh < 0 ||
       !Number.isFinite(windDirectionDeg) || windDirectionDeg < 0 ||
       windDirectionDeg >= 360) return null;
 
-  return { stationId, windSpeedKmh, windDirectionDeg };
+  return {
+    stationId,
+    windSpeedKmh,
+    windDirectionDeg,
+    ...(gps ? { gps } : {}),
+    ...(typeof lat === 'number' ? { lat } : {}),
+    ...(typeof lon === 'number' ? { lon } : {}),
+    ...(typeof lng === 'number' ? { lng } : {}),
+  };
 }
 
 function start() {

@@ -17,7 +17,7 @@
   font-weight: 500;
   border-radius: 4px;
   color: #637075;
-  transition: all 0.15s ease;
+  transition: background .15s ease, border-color .15s ease, transform .15s ease;
 }
 .source-toggle button.active {
   background: white;
@@ -71,6 +71,7 @@
   gap: 10px;
   animation: fadeInDown 0.2s ease-out;
 }
+@keyframes overlay-fade { from { opacity: 0; } to { opacity: 1; } }
 .alert-banner button {
   color: white;
   opacity: 0.85;
@@ -159,9 +160,9 @@
 /* User Pill & Auth Modal */
 .user-pill {
   position: absolute;
-  top: 14px;
-  right: 14px;
-  z-index: 120;
+  top: 68px;
+  right: 20px;
+  z-index: 650;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -175,7 +176,13 @@
   color: #314449;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background .15s ease, border-color .15s ease, transform .15s ease;
+}
+@media (max-width: 760px) {
+  .user-pill {
+    top: 124px;
+    right: 12px;
+  }
 }
 .user-pill:hover {
   background: #ffffff;
@@ -208,7 +215,7 @@
   align-items: center;
   justify-content: center;
   padding: 16px;
-  animation: fadeInDown 0.2s ease-out;
+  animation: overlay-fade .15s ease-out;
 }
 .auth-card {
   background: #ffffff;
@@ -431,57 +438,83 @@
 
 /* Control Downlink Section */
 .control-box {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 14px;
-  margin: 12px 0;
+  padding: 23px 0 4px;
 }
-.control-box h3 {
-  font-size: 13px;
-  font-weight: 600;
-  color: #1e293b;
-  margin: 0 0 4px 0;
-}
-.control-box p {
-  font-size: 11px;
-  color: #64748b;
-  margin: 0 0 12px 0;
-}
+.control-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.section-eyebrow{display:block;font-size:9px;letter-spacing:1.1px;color:#89979d;margin-bottom:8px}
+.control-heading h2{font-size:18px;font-weight:400;letter-spacing:-.3px}
+.connection-pill{display:inline-flex;align-items:center;gap:5px;flex:none;font-size:10px;color:#859398;background:#f3f5f5;border-radius:20px;padding:6px 8px}
+.connection-pill i{width:5px;height:5px;background:currentColor;border-radius:50%}
+.connection-pill.connected{color:#33816d;background:#edf7f2}
+.control-intro{font-size:11px;line-height:1.6;color:#89979d;margin-top:9px}
+.control-notice{display:flex;align-items:center;justify-content:space-between;gap:8px;background:#f1f6f7;color:#607d87;font-size:11px;line-height:1.6;padding:12px;border-radius:5px;margin-top:19px}
+.control-notice button{display:flex;align-items:center;gap:3px;white-space:nowrap;color:var(--blue);font-weight:600}
+.command-key-label{display:block;margin-top:20px;font-size:10px;color:#6b8089}
+.command-key-label input{display:block;width:100%;border:1px solid #dfe7eb;border-radius:5px;padding:10px 11px;font-size:12px;margin-top:7px;color:#46616d;background:white}
+.command-key-label small{display:block;color:#98a4aa;font-size:10px;margin-top:6px}
+.command-actions{margin-top:18px;border-top:1px solid var(--line)}
 .command-btn {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  gap: 11px;
   width: 100%;
-  background: #f8fafc;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 8px 12px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #334155;
-  cursor: pointer;
-  margin-bottom: 8px;
-  transition: all 0.15s ease;
+  border-bottom: 1px solid var(--line);
+  padding: 17px 0;
+  text-align: left;
+  color: #42636f;
+  transition: background .15s;
 }
-.command-btn:hover:not(:disabled) {
-  background: #f1f5f9;
-  border-color: #94a3b8;
-}
+.command-btn:hover:not(:disabled){background:#f5f9fa}
+.command-icon{display:grid;place-items:center;width:35px;height:35px;flex:none;background:#f0f6f7;border-radius:9px;color:#467d8e}
+.command-copy{flex:1;min-width:0}
+.command-copy b{display:block;font-size:12px;font-weight:500;line-height:1.4}
+.command-copy small{display:block;font-size:10px;line-height:1.6;color:#8d9ba2;margin-top:4px}
+.command-btn>svg{flex:none;color:#a7b4ba}
 .command-btn:disabled {
-  opacity: 0.55;
+  opacity: 0.6;
   cursor: not-allowed;
 }
-.command-log {
-  background: #0f172a;
-  color: #38bdf8;
-  font-family: monospace;
-  font-size: 11px;
-  border-radius: 6px;
-  padding: 8px 10px;
-  max-height: 100px;
-  overflow-y: auto;
-  margin-top: 10px;
-}
+.command-caption{font-size:10px;line-height:1.7;color:#94a1a7;margin:12px 0 25px}
+.command-history-heading{display:flex;justify-content:space-between;align-items:center}
+.command-history-heading h3{font-size:12px;font-weight:400;margin:0;color:#536e7a}
+.command-history-heading>span{font-size:9px;color:#9ca8ad}
+.command-log{margin-top:14px;max-height:240px;overflow:auto}
+.command-empty{display:flex;align-items:center;gap:12px;padding:22px 15px;background:#f7f9f9;border:1px dashed #e0e7e9;border-radius:6px;color:#98aaaf}
+.command-empty>span{font-size:11px;color:#6c818a}
+.command-empty small{display:block;font-size:10px;color:#9ca8ad;margin-top:6px;line-height:1.6}
+.command-entry{display:flex;gap:8px;align-items:flex-start;border-bottom:1px solid #eff2f3;padding:12px 0}
+.command-entry>i{width:5px;height:5px;margin-top:4px;border-radius:50%;background:#c87368;flex:none}
+.command-entry>i.queued{background:#46977f}
+.command-entry>div{flex:1;min-width:0}
+.command-entry b{display:block;font-size:11px;font-weight:400;color:#536e7a}
+.command-entry small{display:block;font-size:10px;color:#94a1a7;line-height:1.5;margin-top:5px;overflow-wrap:anywhere}
+.command-entry time{font-size:9px;color:#99a6ad;white-space:nowrap}
+.command-spinner{width:14px;height:14px;border:2px solid #d8e6ea;border-top-color:#287b91;border-radius:50%;animation:command-spin .8s linear infinite;flex:none}
+@keyframes command-spin{to{transform:rotate(360deg)}}
+.detail-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));padding:0 14px}
+.detail-tabs button{margin:0;padding:13px 3px;min-width:0;font-size:11px;line-height:1.5}
+.add-station-shortcut{border-left:1px solid #e8edef;border-radius:0;color:#387e91}
+.panel-actions .delete-station-btn{color:#b2615a;padding-left:9px;padding-right:9px;gap:5px}
+.panel-actions .delete-station-btn:hover{background:#fcf4f2}
+.panel-actions .delete-station-btn:disabled{opacity:.5;cursor:not-allowed}
+@media(max-width:760px){.panel-actions .delete-station-btn{padding:7px}.station-panel:has(.delete-station-btn) .station-state>span:last-child{margin-right:95px}}
+.add-station-row{display:flex;align-items:center;gap:10px;width:100%;padding:16px 20px;color:#387e91;font-size:12px;text-align:left;border-bottom:1px solid #f0f2f2}
+.add-station-row span{flex:1}.add-station-row:hover{background:#f2f7f8}
+.station-dialog{width:100%;max-width:420px;max-height:calc(100dvh - 32px);overflow:auto;background:white;border-radius:12px;padding:25px;box-shadow:0 12px 40px #173a4d30}
+.station-dialog-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.station-dialog h2{font-size:22px;letter-spacing:-.5px;font-weight:400}
+.station-dialog>p{font-size:12px;line-height:1.7;color:#8b989f;margin-top:10px}
+.station-form label{display:block;font-size:11px;color:#627b86;margin-top:20px}
+.station-form input{display:block;width:100%;padding:11px 12px;margin-top:8px;border:1px solid #dfe7eb;border-radius:5px;color:#46616d;background:white;font-size:13px}
+.station-form small{display:block;font-size:10px;color:#96a4ab;line-height:1.6;margin-top:6px}
+.station-form fieldset{border:0;padding:0;margin:23px 0 0;min-width:0}
+.station-form legend{font-size:11px;color:#627b86}
+.coordinate-fields{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}
+.coordinate-fields label{margin-top:12px;font-size:10px}
+.station-storage-note{font-size:10px;line-height:1.7;color:#8b9ba3;background:#f5f8f9;padding:12px;margin-top:20px;border-radius:5px}
+.station-form-error{font-size:11px;line-height:1.6;color:#b3574e;margin-top:12px}
+.station-form-actions{display:flex;justify-content:flex-end;align-items:center;gap:18px;margin-top:24px;font-size:12px;color:#7c8c94}
+.station-form-actions .primary-button{display:flex;align-items:center;gap:7px;margin:0;font-size:12px;padding:11px 15px}
+@media(max-width:760px){.detail-tabs button{font-size:11px;padding:11px 2px}.station-dialog{padding:22px}.control-box{padding-top:20px}}
+@media(prefers-reduced-motion:reduce){.auth-overlay,.command-spinner{animation:none}}
 

@@ -11,11 +11,19 @@ export function stationSource(station) {
 
 export function validReading(id, value) {
   if (!value || value.stationId !== id) return null;
-  const { windSpeedKmh, windDirectionDeg, receivedAt } = value;
+  const { windSpeedKmh, windDirectionDeg, receivedAt, gps, lat, lon, lng } = value;
   if (!Number.isFinite(windSpeedKmh) || windSpeedKmh < 0 ||
       !Number.isFinite(windDirectionDeg) || windDirectionDeg < 0 || windDirectionDeg >= 360 ||
       !Number.isFinite(receivedAt) || receivedAt <= 0) return null;
-  return { windSpeedKmh, windDirectionDeg, receivedAt };
+  return {
+    windSpeedKmh,
+    windDirectionDeg,
+    receivedAt,
+    ...(gps ? { gps } : {}),
+    ...(typeof lat === 'number' ? { lat } : {}),
+    ...(typeof lon === 'number' ? { lon } : {}),
+    ...(typeof lng === 'number' ? { lng } : {}),
+  };
 }
 
 export function displayStations(simulated, readings, now) {

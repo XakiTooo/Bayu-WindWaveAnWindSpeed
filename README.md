@@ -213,6 +213,16 @@ Dashboard-Bayu/
 
 ---
 
+## Menambah Stasiun di Dashboard
+
+Masuk sebagai admin, lalu klik tombol **+** di kolom pencarian atau **Tambah stasiun** pada daftar stasiun. Isi nama, ID unik (misalnya `ANGIN-06`), dan koordinat cadangan. Daftar stasiun tersimpan di browser yang digunakan dan tetap ada setelah halaman dimuat ulang.
+
+Untuk menghapus stasiun tambahan, pilih titiknya lalu klik **Hapus** dan konfirmasi. Titik, konfigurasi, dan riwayat sesi stasiun tersebut dihapus dari browser ini; data alat di server tetap tersimpan. Stasiun bawaan tidak dapat dihapus.
+
+Alat harus mengirim telemetri dengan ID yang sesuai ke `bayu/stations/angin-06/telemetry`. Dashboard membaca setiap stasiun secara terpisah melalui `/api/check-data?stationId=angin-06`. Stasiun baru tampil offline sampai menerima data; lokasi menggunakan koordinat cadangan saat GPS belum terkunci. Broker perlu memberi izin membaca topik stasiun tersebut.
+
+Pada tab **Kontrol Alat**, isi `BAYU_COMMAND_SECRET` dari `.env.local` pada kolom **Kunci perintah**. Kunci ini berbeda dari `BAYU_TELEMETRY_SHARE_KEY`. Sebelum upload firmware pengirim, salin `firmware/AeroSense_Sensor_Pengirim/config.example.h` menjadi `config.h` di folder yang sama, lalu isi Wi-Fi dan kredensial MQTT. Untuk kalibrasi utara, arahkan bilah sensor ke utara lalu klik **Kalibrasi arah utara**. Dashboard mengirim `calibrate_zero` langsung ke topik MQTT `bayu/stations/<id>/cmd`; firmware pengirim yang telah di-upload ulang menyimpan sudut saat itu sebagai 0° lalu membalas ke `bayu/stations/<id>/ack`. Web hanya menampilkan sukses setelah menerima konfirmasi dari ESP. Restart server dashboard setelah mengubah `.env.local`, dan pastikan `MQTT_URL`, `MQTT_USERNAME`, `MQTT_PASSWORD`, serta `MQTT_CA_FILE` tersedia di server. Cek Serial Monitor ESP untuk pesan **KALIBRASI UTARA SUKSES**. Perintah lain masih memakai antrean Firebase dan pelaksanaannya bergantung pada dukungan alat.
+
 ## 👥 Pengembang
 
 - **Kelompok 53 — Praktikum Internet of Things**
