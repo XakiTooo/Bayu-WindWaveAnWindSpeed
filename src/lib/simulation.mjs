@@ -1,20 +1,20 @@
-export const CENTER = [-7.7823031, 110.4159049];
+export const CENTER = [-7.782233, 110.415517]; // Titik cadangan saat GPS belum mendapat lokasi.
 export const DEFAULT_SETTINGS = { threshold: 40, batteryThreshold: 20 };
 const names = ['Utara', 'Timur Laut', 'Timur', 'Tenggara', 'Selatan', 'Barat Daya', 'Barat', 'Barat Laut'];
 export const format = (value) => value.toLocaleString('id-ID', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 export const direction = (angle) => names[Math.round(((angle % 360) + 360) % 360 / 45) % 8];
 export const timeLabel = (timestamp) => new Date(timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Jakarta' });
-export const state = (station, settings) => !station.online ? 'offline' : station.speed >= settings.threshold ? 'alarm' : station.battery <= settings.batteryThreshold ? 'warning' : 'normal';
+export const state = (station, settings) => !station.online ? 'offline' : station.speed >= settings.threshold ? 'alarm' : Number.isFinite(station.battery) && station.battery <= settings.batteryThreshold ? 'warning' : 'normal';
 export const stateLabel = (station, settings) => ({ normal: 'Normal', warning: 'Baterai lemah', alarm: 'Alarm angin', offline: 'Data terputus' })[state(station, settings)];
 export const stateColor = (station, settings) => ({ normal: '#268fa0', warning: '#d89a3e', alarm: '#d56864', offline: '#96a2ad' })[state(station, settings)];
 
 export function createStations(timestamp = 0) {
   return [
-    { id: 'ANGIN-01', name: 'Titik Kampus', lat: CENTER[0], lng: CENTER[1], base: 18.4, speed: 18.4, angle: 225, battery: 86, online: true },
-    { id: 'ANGIN-02', name: 'Titik Utara', lat: -7.7788, lng: 110.4152, base: 22.6, speed: 22.6, angle: 210, battery: 72, online: true },
-    { id: 'ANGIN-03', name: 'Titik Timur', lat: -7.7812, lng: 110.4204, base: 43.2, speed: 43.2, angle: 248, battery: 63, online: true },
-    { id: 'ANGIN-04', name: 'Titik Selatan', lat: -7.7860, lng: 110.4169, base: 14.7, speed: 14.7, angle: 192, battery: 17, online: true },
-    { id: 'ANGIN-05', name: 'Titik Barat', lat: -7.7836, lng: 110.4115, base: 16.2, speed: 16.2, angle: 235, battery: 48, online: false },
+    { id: 'ANGIN-01', name: 'Stasiun IoT (Tiang Utama)', lat: CENTER[0], lng: CENTER[1], base: 0, speed: 0, angle: 0, battery: 100, online: true },
+    { id: 'ANGIN-02', name: 'Titik Utara', lat: -7.7580, lng: 110.4085, base: 22.6, speed: 22.6, angle: 210, battery: 72, online: true },
+    { id: 'ANGIN-03', name: 'Titik Timur', lat: -7.7610, lng: 110.4135, base: 43.2, speed: 43.2, angle: 248, battery: 63, online: true },
+    { id: 'ANGIN-04', name: 'Titik Selatan', lat: -7.7660, lng: 110.4100, base: 14.7, speed: 14.7, angle: 192, battery: 17, online: true },
+    { id: 'ANGIN-05', name: 'Titik Barat', lat: -7.7635, lng: 110.4045, base: 16.2, speed: 16.2, angle: 235, battery: 48, online: false },
   ].map((station, index) => ({ ...station, updated: timestamp - (station.online ? 0 : 180000), samples: Array.from({ length: 30 }, (_, j) => Math.max(0, station.base + Math.sin(j * .7 + index) * 3 + Math.cos(j * .31) * 1.5)) }));
 }
 
@@ -124,10 +124,13 @@ export function getDeviceHealth(station) {
       espNowLoss: '0.0%',
       uptime: '3j 45m',
       heapKb: 178,
+      gpsStatus: 'Lock (Kampus UPN)',
     };
   }
   const isOnline = Boolean(station.online);
   const isMqtt = station.source === 'mqtt';
+  const hasGpsFix = station.gpsInfo ? station.gpsInfo.fix : false;
+  const sats = station.gpsInfo ? station.gpsInfo.sats : 0;
   return {
     wifiRssi: isOnline ? (isMqtt ? -64 : -70) : -95,
     wifiStatus: !isOnline ? 'Terputus' : (isMqtt ? 'Sangat Baik' : 'Baik'),
@@ -135,6 +138,7 @@ export function getDeviceHealth(station) {
     espNowLoss: isOnline ? (isMqtt ? '0.1%' : '0.0%') : '100%',
     uptime: isOnline ? '5j 18m' : '—',
     heapKb: isOnline ? 186 : 0,
+    gpsStatus: hasGpsFix ? `Satelit Terkunci (${sats} Sats)` : 'GPS belum terkunci (lokasi cadangan)',
   };
 }
 
@@ -159,13 +163,21 @@ export function validateUserLogin(username, password, storedUsers = []) {
 export function updateStationFromTelemetry(station, telemetry) {
   if (!station || !telemetry) return station;
   const isRecent = telemetry.status === 'recent';
-  const speed = Number.isFinite(telemetry.windSpeedKmh) ? telemetry.windSpeedKmh : station.speed;
-  const angle = Number.isFinite(telemetry.windDirectionDeg) ? telemetry.windDirectionDeg : station.angle;
+  const speed = Number.isFinite(telemetry.windSpeedKmh) ? telemetry.windSpeedKmh : (Number.isFinite(telemetry.speed_kmh) ? telemetry.speed_kmh : station.speed);
+  const angle = Number.isFinite(telemetry.windDirectionDeg) ? telemetry.windDirectionDeg : (Number.isFinite(telemetry.direction_deg) ? telemetry.direction_deg : station.angle);
   const updated = telemetry.receivedAt || Date.now();
-  const lat = (typeof telemetry.lat === 'number' && telemetry.lat !== 0) ? telemetry.lat : station.lat;
-  const lng = (typeof telemetry.lng === 'number' && telemetry.lng !== 0)
-    ? telemetry.lng
-    : ((typeof telemetry.lon === 'number' && telemetry.lon !== 0) ? telemetry.lon : station.lng);
+  let lat = station.fallbackLat ?? CENTER[0];
+  let lng = station.fallbackLng ?? CENTER[1];
+  const validCoordinates = (latitude, longitude) => Number.isFinite(latitude) && Number.isFinite(longitude)
+    && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 && (latitude !== 0 || longitude !== 0);
+  const hasGpsFix = telemetry.gps && (telemetry.gps.fix === true || telemetry.gps.fix === 'true');
+  if (hasGpsFix && validCoordinates(telemetry.gps.lat, telemetry.gps.lon)) {
+    lat = telemetry.gps.lat;
+    lng = telemetry.gps.lon;
+  } else if (!telemetry.gps && validCoordinates(telemetry.lat, telemetry.lng ?? telemetry.lon)) {
+    lat = telemetry.lat;
+    lng = telemetry.lng ?? telemetry.lon;
+  }
   const samples = station.samples ? [...station.samples.slice(1), speed] : [speed];
 
   return {
@@ -179,5 +191,6 @@ export function updateStationFromTelemetry(station, telemetry) {
     samples,
     source: telemetry.source || 'mqtt',
     ageSeconds: telemetry.ageSeconds,
+    gpsInfo: telemetry.gps,
   };
 }

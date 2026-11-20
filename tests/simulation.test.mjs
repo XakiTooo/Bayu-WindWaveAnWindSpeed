@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createCustomStation, restoreCustomStations, applyStationTelemetry, removeCustomStation } from '../src/lib/stations.mjs';
 import {
   createStations,
   advance,
@@ -15,6 +16,56 @@ import {
   updateStationFromTelemetry,
   DEFAULT_SETTINGS
 } from '../src/lib/simulation.mjs';
+
+test('station registration rejects duplicate IDs and invalid coordinates', () => {
+  const input = { id: '  angin-06 ', name: 'Lapangan Timur', lat: -7.78, lng: 110.41 };
+  const station = createCustomStation(input);
+  assert.equal(station.id, 'ANGIN-06');
+  assert.equal(station.online, false);
+  assert.deepEqual(station.samples, []);
+  assert.throws(() => createCustomStation({ ...input, id: 'angin-01' }), /sudah digunakan/);
+  assert.throws(() => createCustomStation(input, [station]), /sudah digunakan/);
+  for (const invalid of [{ lat: 91 }, { lng: -181 }, { lat: '' }, { name: ' ' }, { id: '../bad' }]) {
+    assert.throws(() => createCustomStation({ ...input, ...invalid }));
+  }
+});
+
+test('stored station registration restores configuration without trusting cached live state', () => {
+  const input = { id: 'angin-06', name: 'Lapangan Timur', lat: -7.78, lng: 110.41, online: true, speed: 100 };
+  const restored = restoreCustomStations([null, input, input, { ...input, id: 'angin-01' }]);
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].speed, 0);
+  assert.equal(restored[0].online, false);
+  assert.deepEqual(restoreCustomStations({}), []);
+});
+
+test('telemetry updates only its matching station and preserves the registered fallback', () => {
+  const custom = createCustomStation({ id: 'angin-06', name: 'Lapangan Timur', lat: -7.78, lng: 110.41 });
+  const stations = [...createStations(), custom];
+  const updated = applyStationTelemetry(stations, { stationId: 'angin-06', status: 'recent', windSpeedKmh: 28, gps: { fix: false } });
+  assert.equal(updated[0], stations[0]);
+  assert.equal(updated[5].speed, 28);
+  assert.equal(updated[5].online, true);
+  assert.equal(state(updated[5], DEFAULT_SETTINGS), 'normal');
+  assert.equal(updated[5].lat, -7.78);
+  assert.equal(updated[5].lng, 110.41);
+  assert.deepEqual(applyStationTelemetry(stations, { stationId: 'unknown' }), stations);
+});
+
+test('removing a custom station preserves other selections and protects built-in stations', () => {
+  const custom = createCustomStation({ id: 'angin-06', name: 'Timur', lat: -7.78, lng: 110.41 });
+  const other = createCustomStation({ id: 'angin-07', name: 'Barat', lat: -7.79, lng: 110.4 });
+  const model = { stations: [...createStations(), custom, other], selected: 6, history: [{ id: custom.id }, { id: other.id }] };
+  const next = removeCustomStation(model, custom.id);
+  assert.equal(next.stations[next.selected].id, other.id);
+  assert.equal(next.selected, 5);
+  assert.deepEqual(next.history, [{ id: other.id }]);
+  assert.equal(removeCustomStation(model, 'ANGIN-01'), model);
+  assert.equal(removeCustomStation(model, 'UNKNOWN'), model);
+  assert.equal(removeCustomStation({ ...model, selected: 5 }, custom.id).selected, 0);
+  assert.equal(removeCustomStation({ ...model, selected: null }, custom.id).selected, null);
+  assert.equal(model.stations.length, 7);
+});
 
 test('alarm threshold is inclusive and takes priority over low battery', () => {
   const station = { ...createStations()[0], speed: 40, battery: 5 };
@@ -48,7 +99,7 @@ test('CSV retains coordinates and marks records as simulated', () => {
   const csv = exportCsv(records(createStations(1000000)));
   assert.equal(csv.split('\n').length, 5);
   assert.match(csv, /latitude,longitude,data_type/);
-  assert.match(csv, /-7.7823031,110.4159049,SIMULASI/);
+  assert.match(csv, /-7.782233,110.415517,SIMULASI/);
 });
 
 test('calculateStats handles records and empty lists correctly', () => {
@@ -95,6 +146,18 @@ test('updateStationFromTelemetry integrates hardware readings and updates online
   const staleTelemetry = { ...telemetry, status: 'stale' };
   const staleStation = updateStationFromTelemetry(base, staleTelemetry);
   assert.equal(staleStation.online, false);
+});
+
+test('missing or invalid GPS returns to the fallback after a previous fix', () => {
+  const station = { ...createStations()[0], lat: -7.8, lng: 110.5 };
+  for (const gps of [undefined, { fix: false, lat: -7.8, lon: 110.5 }, { fix: true, lat: 0, lon: 0 }, { fix: true, lat: -7.8 }, { fix: true, lat: 91, lon: 110 }]) {
+    const updated = updateStationFromTelemetry(station, { gps });
+    assert.equal(updated.lat, -7.782233);
+    assert.equal(updated.lng, 110.415517);
+  }
+  const fixed = updateStationFromTelemetry(station, { gps: { fix: true, lat: -7.79, lon: 110.42 } });
+  assert.equal(fixed.lat, -7.79);
+  assert.equal(fixed.lng, 110.42);
 });
 
 test('CSV correctly marks HARDWARE_REAL for mqtt source rows', () => {
