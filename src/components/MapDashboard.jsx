@@ -2,6 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import { googleIdToken } from '@/lib/firebase-client';
+import { readApiResponse } from '@/lib/api-response.mjs';
 import { useEffect, useReducer, useRef, useState } from 'react';
 import {
   advance,
@@ -465,13 +466,13 @@ export default function MapDashboard() {
     try {
       const idToken = await googleIdToken();
       const response = await fetch('/api/auth/google', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) throw new Error(data.error || 'Login Google gagal.');
       dispatch({ type: 'set_user', user: data.user });
       setAuthOpen(false);
       setToast('Berhasil masuk. Akun dan stasiun tersimpan di server.');
     } catch (error) {
-      const message = error.code === 'auth/unauthorized-domain' ? 'Tambahkan domain lokal ini di Firebase Authentication → Authorized domains.'
+      const message = error.code === 'auth/unauthorized-domain' ? `Tambahkan ${window.location.hostname} di Firebase Authentication → Authorized domains.`
         : error.code === 'auth/operation-not-allowed' ? 'Aktifkan provider Google di Firebase Authentication.'
         : error.code === 'auth/popup-closed-by-user' ? 'Login Google dibatalkan.' : error.message;
       setToast(message);
@@ -482,7 +483,7 @@ export default function MapDashboard() {
     event.preventDefault();
     try {
       const res = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: authUsername, password: authPassword }) });
-      const data = await res.json();
+      const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Login gagal.');
       dispatch({ type: 'set_user', user: data.user });
       setAuthOpen(false);
