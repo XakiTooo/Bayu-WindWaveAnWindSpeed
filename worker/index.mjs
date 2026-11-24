@@ -7,6 +7,7 @@ import mqtt from 'mqtt';
 const telemetryTopic = 'bayu/stations/+/telemetry';
 const topicPattern = /^bayu\/stations\/([a-z0-9-]{1,64})\/telemetry$/;
 const historyIntervalMs = 60_000;
+const alertCooldownMs = 10 * 60_000;
 
 function required(name) {
   const value = process.env[name];
@@ -26,7 +27,7 @@ function parseTelemetry(topic, payload) {
   }
 
   if (!data || data.stationId !== stationId) return null;
-  const { windSpeedKmh, windDirectionDeg, gps, lat, lon, lng } = data;
+  const { windSpeedKmh, windDirectionDeg, gps, lat, lon, lng, rssi, uptime_s, heap_kb, packet_id, is_muted, battery } = data;
   if (!Number.isFinite(windSpeedKmh) || windSpeedKmh < 0 ||
       !Number.isFinite(windDirectionDeg) || windDirectionDeg < 0 ||
       windDirectionDeg >= 360) return null;
@@ -39,6 +40,12 @@ function parseTelemetry(topic, payload) {
     ...(typeof lat === 'number' ? { lat } : {}),
     ...(typeof lon === 'number' ? { lon } : {}),
     ...(typeof lng === 'number' ? { lng } : {}),
+    ...(Number.isFinite(rssi) ? { rssi } : {}),
+    ...(Number.isFinite(uptime_s) ? { uptime_s } : {}),
+    ...(Number.isFinite(heap_kb) ? { heap_kb } : {}),
+    ...(Number.isFinite(packet_id) ? { packet_id } : {}),
+    ...(typeof is_muted === 'boolean' ? { is_muted } : {}),
+    ...(Number.isFinite(battery) && battery >= 0 && battery <= 100 ? { battery } : {}),
   };
 }
 
@@ -54,6 +61,10 @@ function start() {
   const database = getDatabase(app);
   const firestore = getFirestore(app);
   const historyMinutes = new Map();
+  const lastAlerts = new Map();
+  const alertThreshold = Number(process.env.BAYU_ALERT_THRESHOLD_KMH);
+  const telegramToken = process.env.BAYU_TELEGRAM_BOT_TOKEN;
+  const telegramChatId = process.env.BAYU_TELEGRAM_CHAT_ID;
   const client = mqtt.connect(mqttUrl.href, {
     username,
     password,
@@ -84,6 +95,17 @@ function start() {
     }
 
     const receivedAt = Date.now();
+    if (telegramToken && telegramChatId && Number.isFinite(alertThreshold) && alertThreshold > 0 &&
+        reading.windSpeedKmh >= alertThreshold && receivedAt - (lastAlerts.get(reading.stationId) || 0) >= alertCooldownMs) {
+      lastAlerts.set(reading.stationId, receivedAt);
+      fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: telegramChatId,
+          text: `Peringatan BAYU: ${reading.stationId} ${reading.windSpeedKmh.toFixed(1)} km/jam (batas ${alertThreshold} km/jam).` }),
+        signal: AbortSignal.timeout(8000),
+      }).then((res) => { if (!res.ok) console.error('Telegram alert gagal:', res.status); })
+        .catch((error) => console.error('Telegram alert gagal:', error.name));
+    }
     const minute = Math.floor(receivedAt / historyIntervalMs);
     const latestPath = `stations/${reading.stationId}/latest`;
     const latestWrite = database.ref(latestPath)

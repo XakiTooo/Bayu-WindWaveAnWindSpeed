@@ -3,7 +3,7 @@ import './maps.css';
 
 export const metadata = {
   title: 'BAYU — Pemantauan Angin',
-  description: 'Dashboard demo stasiun angin IoT di sekitar Kampus Babarsari UPN Yogyakarta. Seluruh pembacaan merupakan data simulasi.',
+  description: 'Dashboard pemantauan stasiun angin BAYU dengan mode sensor IoT langsung dan mode simulasi.',
 };
 
 export default function RootLayout({ children }) {

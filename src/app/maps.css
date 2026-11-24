@@ -518,3 +518,84 @@
 @media(max-width:760px){.detail-tabs button{font-size:11px;padding:11px 2px}.station-dialog{padding:22px}.control-box{padding-top:20px}}
 @media(prefers-reduced-motion:reduce){.auth-overlay,.command-spinner{animation:none}}
 
+/* Readable dashboard typography and touch targets */
+body{font-size:16px;line-height:1.5}
+.map-search,.station-panel,.station-list{width:min(420px,calc(100vw - 40px))}
+.map-search{height:64px;border-radius:12px}
+.station-panel{top:98px;border-radius:12px}
+.station-list{top:94px}
+.search-field input{font-size:16px}
+.location-chip{top:100px}
+.location-chip button,.simulation-control,.source-toggle button,.live-badge,.user-pill{font-size:13px}
+.panel-top h1{font-size:27px;font-weight:600;line-height:1.2}
+.panel-top p,.station-code,.station-state>span:last-child,.status,.result-text small,.result-speed small{font-size:12px}
+.result-text b,.result-speed,.panel-actions button,.detail-tabs button,.stat-label,.speed-secondary,.direction-stat p,.device-details>div,.chart-heading h2,.coordinates p,.panel-disclosure,.history-section>p,.settings-section>p,.settings-section label,.settings-section input,.primary-button,.scenario-options button,.map-key,.map-caption,.auth-form label,.auth-form input,.auth-hint,.health-title,.health-item b,.health-item small{font-size:14px}
+.detail-tabs{gap:6px;overflow-x:auto;scrollbar-width:thin}
+.detail-tabs button{flex:none;margin-right:13px;min-height:44px}
+.panel-actions button,.primary-button,.remote-btn,.scenario-options button,.command-btn{min-height:44px}
+.history-section>h2,.settings-section>h2{font-size:19px;font-weight:650}
+.stat-card small,.stat-card b,.history-section table,.history-section th,.history-section td,.windrose-row,.weather-box,.device-details dt,.device-details dd{font-size:13px}
+.health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.health-title{gap:12px;flex-wrap:wrap}
+.health-item b{overflow-wrap:anywhere}
+.history-section table{display:block;overflow-x:auto;white-space:nowrap}
+.map-key{flex-wrap:wrap;max-width:calc(100vw - 40px)}
+.station-dialog{width:min(460px,calc(100vw - 24px))}
+.station-form label,.station-form input,.station-form small,.station-storage-note{font-size:14px}
+@media(max-width:760px){
+  .map-search{top:12px;left:12px;width:calc(100% - 24px);height:60px}
+  .station-list{left:12px;top:78px;width:calc(100% - 24px)}
+  .location-chip{left:12px;top:84px;max-width:calc(100% - 150px)}
+  .location-chip button{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .simulation-control{top:142px;right:12px;max-width:calc(100% - 24px);height:auto;min-height:38px}
+  .simulation-control>span{padding:5px 8px}
+  .user-pill{top:88px;right:12px;min-height:40px}
+  .station-panel{left:0;right:0;top:auto;bottom:0;width:100%;height:min(72dvh,690px);max-height:none;border-radius:18px 18px 0 0}
+  .panel-top{padding:19px 18px 10px}
+  .panel-top h1{font-size:23px;max-width:calc(100vw - 75px)}
+  .panel-body{padding:0 18px 20px}
+  .station-state{padding:0 18px 12px}
+  .panel-actions{position:static;padding:0 18px 12px;gap:8px;flex-wrap:wrap}
+  .panel-actions button{font-size:13px;border:1px solid #e3e8e9;padding:8px 11px}
+  .station-state>span:last-child,.station-panel:has(.delete-station-btn) .station-state>span:last-child{margin-right:0}
+  .detail-tabs{padding:0 16px}
+  .detail-tabs button{font-size:14px;padding:11px 3px}
+  .health-grid{grid-template-columns:1fr 1fr}
+  .map-key{left:12px;bottom:18px;font-size:12px}
+  .panel-open .leaflet-control-zoom{margin-bottom:calc(72dvh + 15px)!important}
+  .panel-open .fit-button{bottom:calc(72dvh + 90px)}
+  .panel-open .leaflet-control-attribution{bottom:72dvh}
+  .panel-open .toast{bottom:calc(72dvh + 12px)}
+}
+@media(max-width:390px){
+  .health-grid,.stats-grid{grid-template-columns:1fr}
+  .simulation-control{top:138px;font-size:12px}
+  .location-chip{max-width:calc(100% - 120px)}
+  .user-pill{padding:5px 8px}
+  .user-pill .role-badge{display:none}
+}
+
+.auth-card{max-width:480px;max-height:calc(100dvh - 32px);overflow-y:auto}
+.auth-form input,.auth-form select{font-size:16px;min-height:44px}
+.auth-form select{display:block;width:100%;margin-top:4px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:white;color:#1e293b}
+.auth-header h2{font-size:21px}
+.auth-btn{font-size:15px;min-height:44px}
+.user-management{border-top:1px solid #e2e8f0;padding-top:14px;margin:14px 0}
+.user-management h3{font-size:16px;margin:0 0 12px}
+.managed-user-list{display:grid;gap:8px;max-height:185px;overflow:auto;margin-bottom:18px}
+.managed-user{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px;border:1px solid #e2e8f0;border-radius:8px}
+.managed-user span{min-width:0;overflow-wrap:anywhere}
+.managed-user small{display:block;color:#64748b;font-size:12px;margin-top:3px}
+.managed-user button{flex:none;border:1px solid #cbd5e1;border-radius:6px;padding:8px;color:#334155;font-size:13px;min-height:38px}
+.managed-user button:disabled{opacity:.5;cursor:default}
+
+
+.provisioning-code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 14px; background: #f1f5f9; border-radius: 8px; }
+.google-login { margin: 12px 0; }
+.status.wind-warning { color: #a66b15; }
+.provisioning-dialog { max-width: 560px; max-height: calc(100dvh - 32px); overflow-y: auto; }
+.provisioning-dialog > p { font-size: 14px; line-height: 1.6; margin-bottom: 12px; overflow-wrap: anywhere; }
+.provisioning-dialog .auth-header { gap: 16px; }
+.provisioning-dialog .auth-close { flex: none; min-width: 44px; min-height: 44px; }
+.provisioning-dialog .provisioning-code { margin: 14px 0; }
+.provisioning-done { width: 100%; margin-top: 14px; }

@@ -12,10 +12,11 @@ import {
   calculateStats,
   calculateWindRose,
   getDeviceHealth,
-  validateUserLogin,
   updateStationFromTelemetry,
   DEFAULT_SETTINGS
 } from '../src/lib/simulation.mjs';
+import { cookieHeader, sameOrigin } from '../src/lib/admin-session.mjs';
+import { cleanUsername, hashPassword, verifyPassword } from '../src/lib/auth-crypto.mjs';
 
 test('station registration rejects duplicate IDs and invalid coordinates', () => {
   const input = { id: '  angin-06 ', name: 'Lapangan Timur', lat: -7.78, lng: 110.41 };
@@ -203,29 +204,39 @@ test('calculateWindRose produces 8-sector distribution correctly', () => {
   assert.equal(utara.avgSpeed, 15);
 });
 
-test('getDeviceHealth reflects online and offline states', () => {
-  const onlineStation = { online: true, source: 'mqtt' };
+test('getDeviceHealth only displays values reported by live telemetry', () => {
+  const onlineStation = { online: true, source: 'mqtt', rssi: -64, uptimeSeconds: 3601, heapKb: 186 };
   const offlineStation = { online: false, source: 'mqtt' };
 
   const onlineHealth = getDeviceHealth(onlineStation);
-  assert.equal(onlineHealth.wifiStatus, 'Sangat Baik');
-  assert.equal(onlineHealth.as5600Status, 'Normal (Magnet OK)');
+  assert.equal(onlineHealth.wifiRssi, -64);
+  assert.equal(onlineHealth.wifiStatus, 'Baik');
+  assert.equal(onlineHealth.uptime, '1j 0m');
+  assert.equal(onlineHealth.heapKb, 186);
+  assert.equal(onlineHealth.as5600Status, 'Belum dilaporkan alat');
 
   const offlineHealth = getDeviceHealth(offlineStation);
   assert.equal(offlineHealth.wifiStatus, 'Terputus');
-  assert.equal(offlineHealth.as5600Status, 'Sensor Offline');
+  assert.equal(offlineHealth.wifiRssi, null);
+  assert.equal(offlineHealth.heapKb, null);
 });
 
-test('validateUserLogin handles default admin and stored accounts', () => {
-  const adminRes = validateUserLogin('admin', 'bayu0098');
-  assert.equal(adminRes.valid, true);
-  assert.equal(adminRes.user.role, 'admin');
+test('database account passwords are salted and verified', async () => {
+  const first = await hashPassword('sample-password-123');
+  const second = await hashPassword('sample-password-123');
+  assert.notEqual(first, second);
+  assert.equal(await verifyPassword('sample-password-123', first), true);
+  assert.equal(await verifyPassword('wrong-password', first), false);
+  assert.equal(await verifyPassword('sample-password-123', 'plain-text'), false);
+  await assert.rejects(() => hashPassword('short'));
+  assert.equal(cleanUsername(' ADMIN '), 'admin');
+  assert.equal(cleanUsername('../admin'), null);
+});
 
-  const failRes = validateUserLogin('admin', 'wrongpass');
-  assert.equal(failRes.valid, false);
-
-  const stored = [{ username: 'adhafa', password: 'secret123', role: 'admin', name: 'Adhafa JP' }];
-  const customRes = validateUserLogin('adhafa', 'secret123', stored);
-  assert.equal(customRes.valid, true);
-  assert.equal(customRes.user.name, 'Adhafa JP');
+test('session cookie is protected and requests require same origin', () => {
+  const request = new Request('https://example.test/api/command', { headers: { origin: 'https://example.test' } });
+  assert.equal(sameOrigin(request), true);
+  assert.equal(sameOrigin(new Request(request.url, { headers: { origin: 'https://evil.test' } })), false);
+  assert.match(cookieHeader('a'.repeat(64), request), /HttpOnly; SameSite=Strict/);
+  assert.match(cookieHeader('', request), /Max-Age=0/);
 });

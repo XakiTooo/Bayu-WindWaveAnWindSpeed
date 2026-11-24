@@ -1,6 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import { googleIdToken } from '@/lib/firebase-client';
 import { useEffect, useReducer, useRef, useState } from 'react';
 import {
   advance,
@@ -18,14 +19,13 @@ import {
   state,
   stateLabel,
   timeLabel,
-  validateUserLogin,
 } from '@/lib/simulation.mjs';
 import { createCustomStation, restoreCustomStations, defaultStationDraft, applyStationTelemetry, removeCustomStation } from '@/lib/stations.mjs';
 
 const WindMap = dynamic(() => import('./WindMap'), { ssr: false, loading: () => <div className="map-loading">Memuat peta…</div> });
 
 const initial = {
-  stations: createStations().map((s, index) => index === 0 ? { ...s, online: false, updated: 0, samples: [] } : s),
+  stations: createStations().map((s, index) => index === 0 ? { ...s, online: false, updated: 0, battery: null, samples: [] } : s),
   selected: 0,
   paused: false,
   tick: 0,
@@ -37,7 +37,6 @@ const initial = {
   liveStatus: 'polling',
   user: { username: 'guest', role: 'guest', name: 'Tamu Publik' },
   externalWeather: null,
-  telegramConfig: { botToken: '', chatId: '', enabled: false },
 };
 
 function reducer(model, action) {
@@ -48,7 +47,7 @@ function reducer(model, action) {
         stations = stations.map((s, idx) => idx === 0 ? { ...s, lat: action.coords.lat, lng: action.coords.lng } : s);
       }
       stations = [...stations, ...(action.customStations || [])];
-      if (action.dataSource === 'live') stations = stations.map((s, index) => index === 0 ? { ...s, online: false, updated: 0, samples: [] } : s);
+      if (action.dataSource === 'live') stations = stations.map((s, index) => index === 0 ? { ...s, online: false, updated: 0, battery: null, samples: [] } : s);
       return {
         ...model,
         stations,
@@ -59,7 +58,6 @@ function reducer(model, action) {
         soundAlert: action.soundAlert ?? true,
         shareKey: action.shareKey || '',
         user: action.user || { username: 'guest', role: 'guest', name: 'Tamu Publik' },
-        telegramConfig: action.telegramConfig || { botToken: '', chatId: '', enabled: false },
       };
     }
     case 'tick': {
@@ -96,7 +94,7 @@ function reducer(model, action) {
         id: targetStation.id,
         speed: targetStation.speed,
         angle: ((targetStation.angle % 360) + 360) % 360,
-        battery: targetStation.battery ?? 100,
+        battery: targetStation.battery ?? null,
         lat: targetStation.lat,
         lng: targetStation.lng,
         dataType: 'HARDWARE_REAL',
@@ -106,21 +104,39 @@ function reducer(model, action) {
         ...model,
         stations,
         liveStatus: telemetry.status,
-        history: [liveRecord, ...model.history].slice(0, 1000),
+        history: [liveRecord, ...model.history.filter((row) => row.id !== liveRecord.id || row.timestamp !== liveRecord.timestamp)].slice(0, 1000),
       };
     }
+    case 'load_history': {
+      const existing = new Map(model.history.map((row) => [`${row.id}:${row.timestamp}`, row]));
+      for (const row of action.rows) existing.set(`${row.id}:${row.timestamp}`, row);
+      return { ...model, history: [...existing.values()].sort((a, b) => b.timestamp - a.timestamp).slice(0, 1000) };
+    }
+    case 'registry': {
+      const defaults = createStations().map((station) => ({ ...station, online: false, updated: 0, speed: 0, angle: 0, battery: null, samples: [], registered: false }));
+      const custom = [];
+      for (const entry of action.stations) {
+        const id = entry.id.toUpperCase();
+        const previous = model.stations.find((station) => station.id === id);
+        const restored = { ...(previous || { base: 0, speed: 0, angle: 0, battery: null, online: false, updated: 0, samples: [] }),
+          ...entry, id, fallbackLat: entry.lat, fallbackLng: entry.lng, registered: true,
+          custom: !defaults.some((station) => station.id === id) };
+        const index = defaults.findIndex((station) => station.id === id);
+        if (index >= 0) defaults[index] = restored;
+        else custom.push(restored);
+      }
+      const stations = [...defaults, ...custom];
+      const firstRegistered = stations.findIndex((station) => station.registered);
+      return { ...model, stations, history: [], selected: firstRegistered < 0 ? 0 : firstRegistered };
+    }
+    case 'station_settings': return { ...model, stations: model.stations.map((station) => station.id === action.id ? { ...station, settings: action.settings } : station) };
     case 'add_station': return { ...model, stations: [...model.stations, action.station], selected: model.stations.length, dataSource: 'live' };
     case 'remove_station': return removeCustomStation(model, action.id);
     case 'station_unavailable': return { ...model, stations: model.stations.map((s) => s.id === action.id ? { ...s, online: false } : s) };
     case 'set_user': {
-      try { localStorage.setItem('bayu-user', JSON.stringify(action.user)); } catch {}
       return { ...model, user: action.user };
     }
     case 'set_weather': return { ...model, externalWeather: action.weather };
-    case 'set_telegram': {
-      try { localStorage.setItem('bayu-telegram', JSON.stringify(action.config)); } catch {}
-      return { ...model, telegramConfig: action.config };
-    }
     case 'toggle_sound': {
       const soundAlert = !model.soundAlert;
       try { localStorage.setItem('bayu-sound', JSON.stringify(soundAlert)); } catch {}
@@ -197,34 +213,65 @@ export default function MapDashboard() {
   const [shareKeyInput, setShareKeyInput] = useState('');
   const [dismissedAlarm, setDismissedAlarm] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
-  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
-  const [authUsername, setAuthUsername] = useState('');
+  const [authStorageMode, setAuthStorageMode] = useState('firestore');
+  const [authUsername, setAuthUsername] = useState('admin');
   const [authPassword, setAuthPassword] = useState('');
-  const [authName, setAuthName] = useState('');
+  const [managedUsers, setManagedUsers] = useState([]);
+  const [newUser, setNewUser] = useState({ username: '', name: '', password: '', role: 'viewer' });
+  const [usersBusy, setUsersBusy] = useState(false);
   const [commandLogs, setCommandLogs] = useState([]);
   const [pendingCommand, setPendingCommand] = useState(null);
-  const [commandKey, setCommandKey] = useState('');
+  const [historyLoadError, setHistoryLoadError] = useState(false);
   const [buzzerMuted, setBuzzerMuted] = useState({});
   const [stationFormOpen, setStationFormOpen] = useState(false);
   const [stationDraft, setStationDraft] = useState(defaultStationDraft);
   const [stationError, setStationError] = useState('');
-  const [telegramToken, setTelegramToken] = useState('');
-  const [telegramChatId, setTelegramChatId] = useState('');
-  const [telegramEnabled, setTelegramEnabled] = useState(false);
   const [customLat, setCustomLat] = useState(CENTER[0]);
   const [customLng, setCustomLng] = useState(CENTER[1]);
   const lastSoundRef = useRef(0);
-  const lastTelegramRef = useRef(0);
 
   const { stations, selected, paused, settings, history, dataSource, soundAlert, shareKey, liveStatus, user, externalWeather } = model;
   const displayStations = dataSource === 'live'
-    ? stations.filter((s, idx) => idx === 0 || s.custom)
+    ? stations.filter((s, idx) => user.role === 'guest' ? idx === 0 : s.registered)
     : stations.filter((s) => !s.custom);
 
   const selectedIndex = selected === null ? -1 : displayStations.findIndex((s) => s.id === stations[selected]?.id);
   const validSelected = selectedIndex < 0 ? null : selectedIndex;
   const station = validSelected === null ? null : displayStations[validSelected];
-  const liveStationIds = stations.filter((s, index) => index === 0 || s.custom).map((s) => s.id).join(',');
+  const liveStationIds = displayStations.filter((s) => s.registered || (user.role === 'admin' && s.id === 'ANGIN-01')).map((s) => s.id).join(',');
+  const canManage = Boolean(station && user.role !== 'guest' && (user.role === 'admin' || station.ownerId === user.username));
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const [registrationInfo, setRegistrationInfo] = useState(null);
+  const [warningThreshold, setWarningThreshold] = useState(5);
+  const [directionOffset, setDirectionOffset] = useState(0);
+
+  async function refreshRegistry() {
+    const response = await fetch('/api/stations', { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Daftar stasiun belum tersedia.');
+    dispatch({ type: 'registry', stations: data.stations });
+  }
+
+  useEffect(() => {
+    if (user.role === 'guest') { dispatch({ type: 'registry', stations: [] }); return; }
+    let active = true;
+    fetch('/api/stations', { cache: 'no-store' }).then(async (res) => {
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Daftar stasiun belum tersedia.');
+      if (active) dispatch({ type: 'registry', stations: data.stations });
+    }).catch((error) => { if (active) setToast(error.message); });
+    return () => { active = false; };
+  }, [user.username, user.role]);
+
+  useEffect(() => {
+    const config = station?.settings;
+    if (!config) return;
+    setThreshold(config.dangerKmh);
+    setWarningThreshold(config.warningKmh);
+    setBatteryThreshold(config.batteryThreshold);
+    setDirectionOffset(config.directionOffsetDeg);
+  }, [station?.id, station?.settings]);
+
 
   useEffect(() => {
     let saved = DEFAULT_SETTINGS;
@@ -232,7 +279,6 @@ export default function MapDashboard() {
     let savedSound = true;
     let savedKey = '';
     let savedUser = { username: 'guest', role: 'guest', name: 'Tamu Publik' };
-    let savedTg = { botToken: '', chatId: '', enabled: false };
     let savedCoords = null;
     let savedStations = [];
 
@@ -245,10 +291,9 @@ export default function MapDashboard() {
       savedSound = Boolean(snd);
       const k = localStorage.getItem('bayu-sharekey');
       if (k) savedKey = k;
-      const u = JSON.parse(localStorage.getItem('bayu-user') || 'null');
-      if (u && u.username) savedUser = u;
-      const tg = JSON.parse(localStorage.getItem('bayu-telegram') || 'null');
-      if (tg) savedTg = tg;
+      localStorage.removeItem('bayu-user');
+      localStorage.removeItem('bayu-stored-users');
+      localStorage.removeItem('bayu-telegram');
       const crd = JSON.parse(localStorage.getItem('bayu-station-coords') || 'null');
       if (crd && Number.isFinite(crd.lat) && Number.isFinite(crd.lng)) savedCoords = crd;
       savedStations = restoreCustomStations(JSON.parse(localStorage.getItem('bayu-custom-stations') || '[]'));
@@ -264,8 +309,11 @@ export default function MapDashboard() {
       soundAlert: savedSound,
       shareKey: savedKey,
       user: savedUser,
-      telegramConfig: savedTg,
     });
+    fetch('/api/auth', { cache: 'no-store' }).then((res) => res.json()).then((data) => {
+      if (data.mode) setAuthStorageMode(data.mode);
+      if (data.authenticated && data.user) dispatch({ type: 'set_user', user: data.user });
+    }).catch(() => {});
     if (savedCoords) {
       setCustomLat(savedCoords.lat);
       setCustomLng(savedCoords.lng);
@@ -273,9 +321,6 @@ export default function MapDashboard() {
     setThreshold(saved.threshold);
     setBatteryThreshold(saved.batteryThreshold);
     setShareKeyInput(savedKey);
-    setTelegramToken(savedTg.botToken || '');
-    setTelegramChatId(savedTg.chatId || '');
-    setTelegramEnabled(Boolean(savedTg.enabled));
     setClock(Date.now());
 
     // Fetch external weather once on load
@@ -291,10 +336,11 @@ export default function MapDashboard() {
 
   useEffect(() => {
     if (dataSource !== 'live') return;
-    if (!shareKey) {
+    if (user.role === 'guest' && !shareKey) {
       dispatch({ type: 'set_live_status', status: 'error' });
       return;
     }
+    if (!liveStationIds) return;
     let active = true;
     let polling = false;
     const poll = async () => {
@@ -303,10 +349,10 @@ export default function MapDashboard() {
       try {
         const statuses = await Promise.all(liveStationIds.split(',').map(async (id) => {
           try {
-            const res = await fetch(`/api/check-data?stationId=${encodeURIComponent(id.toLowerCase())}&key=${encodeURIComponent(shareKey)}`, { signal: AbortSignal.timeout(8000) });
+            const res = await fetch(`/api/check-data?stationId=${encodeURIComponent(id.toLowerCase())}`, { headers: { 'x-bayu-read-key': shareKey }, signal: AbortSignal.timeout(8000) });
             const data = await res.json();
             if (!res.ok || !data || data.error || data.stationId?.toLowerCase() !== id.toLowerCase()) throw new Error('Data unavailable');
-            if (active) dispatch({ type: 'live_tick', telemetry: data });
+            if (active) dispatch(data.status === 'waiting' ? { type: 'station_unavailable', id } : { type: 'live_tick', telemetry: data });
             return data.status;
           } catch {
             if (active) dispatch({ type: 'station_unavailable', id });
@@ -321,36 +367,37 @@ export default function MapDashboard() {
     poll();
     const interval = setInterval(poll, 3500);
     return () => { active = false; clearInterval(interval); };
-  }, [dataSource, shareKey, liveStationIds]);
+  }, [dataSource, shareKey, liveStationIds, user.username, user.role]);
+
+  useEffect(() => {
+    if (!authOpen || user.role !== 'admin') return;
+    fetch('/api/users', { cache: 'no-store' }).then((res) => res.json())
+      .then((data) => { if (Array.isArray(data.users)) setManagedUsers(data.users); })
+      .catch(() => {});
+  }, [authOpen, user.role]);
+
+  useEffect(() => {
+    if (dataSource !== 'live' || !liveStationIds || (user.role === 'guest' && !shareKey)) return;
+    let active = true;
+    setHistoryLoadError(false);
+    Promise.all(liveStationIds.split(',').map(async (id) => {
+      const res = await fetch(`/api/history?stationId=${encodeURIComponent(id.toLowerCase())}`, { headers: { 'x-bayu-read-key': shareKey }, cache: 'no-store' });
+      if (!res.ok) throw new Error('Riwayat tidak tersedia');
+      return (await res.json()).rows || [];
+    })).then((groups) => { if (active) dispatch({ type: 'load_history', rows: groups.flat() }); })
+      .catch(() => { if (active) setHistoryLoadError(true); });
+    return () => { active = false; };
+  }, [dataSource, shareKey, liveStationIds, user.username, user.role]);
 
   useEffect(() => {
     if (!soundAlert) return;
-    const isAlarm = displayStations.some((s) => s.online && s.speed >= settings.threshold);
+    const isAlarm = displayStations.some((s) => s.online && s.speed >= (s.settings?.dangerKmh ?? settings.threshold));
     if (isAlarm && Date.now() - lastSoundRef.current > 12000) {
       lastSoundRef.current = Date.now();
       playWarningBeep();
     }
   }, [displayStations, settings.threshold, soundAlert]);
 
-  // Telegram alert dispatch on alarm
-  useEffect(() => {
-    if (!telegramEnabled || !telegramToken || !telegramChatId) return;
-    const alarm = displayStations.find((s) => s.online && s.speed >= settings.threshold);
-    if (alarm && Date.now() - lastTelegramRef.current > 60000) {
-      lastTelegramRef.current = Date.now();
-      fetch('/api/notify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          botToken: telegramToken,
-          chatId: telegramChatId,
-          stationId: alarm.id,
-          speed: format(alarm.speed),
-          threshold: settings.threshold,
-        }),
-      }).catch(() => {});
-    }
-  }, [displayStations, settings.threshold, telegramEnabled, telegramToken, telegramChatId]);
 
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 2600); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => {
@@ -360,6 +407,7 @@ export default function MapDashboard() {
         setListOpen(false);
         setAuthOpen(false);
         setStationFormOpen(false);
+        setRegistrationInfo(null);
       }
     }
     window.addEventListener('keydown', escape);
@@ -371,9 +419,9 @@ export default function MapDashboard() {
   function close() { dispatch({ type: 'select', index: null }); setListOpen(false); }
 
   function openStationForm() {
-    if (user.role !== 'admin') {
+    if (user.role === 'guest') {
       setAuthOpen(true);
-      setToast('Masuk sebagai admin untuk menambah stasiun.');
+      setToast('Masuk untuk mendaftarkan stasiun.');
       return;
     }
     setStationDraft(defaultStationDraft());
@@ -381,23 +429,19 @@ export default function MapDashboard() {
     setStationFormOpen(true);
   }
 
-  function addStation(event) {
+  async function addStation(event) {
     event.preventDefault();
-    if (user.role !== 'admin') return;
+    if (user.role === 'guest') return;
     try {
-      const added = createCustomStation(stationDraft, stations);
-      const customStations = [...stations.filter((s) => s.custom), added];
-      localStorage.setItem('bayu-custom-stations', JSON.stringify(customStations.map(({ id, name, fallbackLat, fallbackLng }) => ({ id, name, lat: fallbackLat, lng: fallbackLng }))));
-      localStorage.setItem('bayu-datasource', 'live');
-      dispatch({ type: 'add_station', station: added });
+      const response = await fetch('/api/stations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(stationDraft) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Pendaftaran gagal.');
+      await refreshRegistry();
+      setRegistrationInfo({ ...data.station, topics: data.topics });
+      dispatch({ type: 'toggle_source', source: 'live' });
       setStationFormOpen(false);
-      setListOpen(false);
-      setSearch('');
-      setTab('summary');
-      setToast(`${added.name} ditambahkan. Menunggu data alat.`);
-    } catch (error) {
-      setStationError(error.message);
-    }
+      setToast('Stasiun tersimpan. Siapkan konfigurasi MQTT alat.');
+    } catch (error) { setStationError(error.message); }
   }
 
   function deleteStation() {
@@ -416,47 +460,75 @@ export default function MapDashboard() {
     }
   }
 
-  function handleAuthSubmit(event) {
-    event.preventDefault();
-    let storedUsers = [];
-    try { storedUsers = JSON.parse(localStorage.getItem('bayu-stored-users') || '[]'); } catch {}
-
-    if (authMode === 'login') {
-      const res = validateUserLogin(authUsername, authPassword, storedUsers);
-      if (res.valid) {
-        dispatch({ type: 'set_user', user: res.user });
-        setToast(`Berhasil masuk sebagai ${res.user.name}.`);
-        setAuthOpen(false);
-        setAuthPassword('');
-      } else {
-        setToast(res.error || 'Login gagal.');
-      }
-    } else {
-      if (!authUsername || !authPassword) {
-        setToast('Username dan password wajib diisi.');
-        return;
-      }
-      const newUser = {
-        username: authUsername.trim().toLowerCase(),
-        password: authPassword.trim(),
-        name: authName.trim() || authUsername.trim(),
-        role: 'admin',
-      };
-      storedUsers.push(newUser);
-      try { localStorage.setItem('bayu-stored-users', JSON.stringify(storedUsers)); } catch {}
-      dispatch({ type: 'set_user', user: { username: newUser.username, role: newUser.role, name: newUser.name } });
-      setToast(`Akun ${newUser.name} terdaftar & masuk sebagai Admin.`);
+  async function handleGoogleLogin() {
+    setGoogleBusy(true);
+    try {
+      const idToken = await googleIdToken();
+      const response = await fetch('/api/auth/google', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Login Google gagal.');
+      dispatch({ type: 'set_user', user: data.user });
       setAuthOpen(false);
-      setAuthPassword('');
-    }
+      setToast('Berhasil masuk. Akun dan stasiun tersimpan di server.');
+    } catch (error) {
+      const message = error.code === 'auth/unauthorized-domain' ? 'Tambahkan domain lokal ini di Firebase Authentication → Authorized domains.'
+        : error.code === 'auth/operation-not-allowed' ? 'Aktifkan provider Google di Firebase Authentication.'
+        : error.code === 'auth/popup-closed-by-user' ? 'Login Google dibatalkan.' : error.message;
+      setToast(message);
+    } finally { setGoogleBusy(false); }
   }
 
-  function handleLogout() {
+  async function handleAuthSubmit(event) {
+    event.preventDefault();
+    try {
+      const res = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: authUsername, password: authPassword }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Login gagal.');
+      dispatch({ type: 'set_user', user: data.user });
+      setAuthOpen(false);
+      setAuthPassword('');
+      setToast(`Berhasil masuk sebagai ${data.user.name}.`);
+    } catch (error) { setToast(error.message); }
+  }
+
+  async function handleLogout() {
+    try {
+      const response = await fetch('/api/auth', { method: 'DELETE' });
+      if (!response.ok) throw new Error();
+    } catch { setToast('Belum bisa keluar. Periksa koneksi lalu coba lagi.'); return; }
     const guestUser = { username: 'guest', role: 'guest', name: 'Tamu Publik' };
     dispatch({ type: 'set_user', user: guestUser });
     setToast('Keluar akun. Sekarang dalam mode Tamu.');
     setAuthOpen(false);
-    setCommandKey('');
+  }
+
+  async function createManagedUser(event) {
+    event.preventDefault();
+    if (usersBusy) return;
+    setUsersBusy(true);
+    try {
+      const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newUser) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Gagal membuat akun.');
+      setManagedUsers((current) => [...current, data.user].sort((a, b) => a.username.localeCompare(b.username)));
+      setNewUser({ username: '', name: '', password: '', role: 'viewer' });
+      setToast(`Akun ${data.user.username} dibuat.`);
+    } catch (error) { setToast(error.message); }
+    finally { setUsersBusy(false); }
+  }
+
+  async function toggleManagedUser(account) {
+    if (usersBusy) return;
+    setUsersBusy(true);
+    try {
+      const res = await fetch('/api/users', { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: account.username, enabled: !account.enabled }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Gagal mengubah akun.');
+      setManagedUsers((current) => current.map((item) => item.username === account.username ? data.user : item));
+      setToast(`${account.username} ${data.user.enabled ? 'diaktifkan' : 'dinonaktifkan'}.`);
+    } catch (error) { setToast(error.message); }
+    finally { setUsersBusy(false); }
   }
 
   function detectBrowserLocation() {
@@ -484,45 +556,32 @@ export default function MapDashboard() {
     );
   }
 
-  function saveSettings(event) {
+  async function saveSettings(event) {
     event.preventDefault();
-    const nextCoords = { lat: Number(customLat), lng: Number(customLng) };
-    if (Number.isFinite(nextCoords.lat) && Number.isFinite(nextCoords.lng)) {
-      dispatch({ type: 'set_station_coords', ...nextCoords });
-      try {
-        localStorage.setItem('bayu-station-coords', JSON.stringify(nextCoords));
-      } catch {}
-    }
-
-    if (user.role !== 'admin') {
-      setToast('Koordinat GPS disimpan. Ambang batas hanya dapat diubah oleh Admin.');
+    if (!canManage || !station?.registered) {
+      setToast('Daftarkan stasiun dan masuk sebagai pemilik untuk menyimpan konfigurasi.');
       return;
     }
-    const next = { threshold: Number(threshold), batteryThreshold: Number(batteryThreshold) };
-    dispatch({ type: 'settings', settings: next });
-    dispatch({ type: 'set_share_key', key: shareKeyInput });
-    const tgConfig = { botToken: telegramToken, chatId: telegramChatId, enabled: telegramEnabled };
-    dispatch({ type: 'set_telegram', config: tgConfig });
     try {
-      localStorage.setItem('bayu-settings', JSON.stringify(next));
-      localStorage.setItem('bayu-sharekey', shareKeyInput);
-    } catch {}
-    setToast('Pengaturan sistem dan koordinat GPS disimpan.');
+      const config = { warningKmh: Number(warningThreshold), dangerKmh: Number(threshold),
+        batteryThreshold: Number(batteryThreshold), directionOffsetDeg: Number(directionOffset) };
+      const response = await fetch('/api/stations/' + station.id.toLowerCase(), {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      dispatch({ type: 'station_settings', id: station.id, settings: data.settings });
+      dispatch({ type: 'settings', settings: { threshold: config.dangerKmh, batteryThreshold: config.batteryThreshold } });
+      setToast('Konfigurasi web tersimpan. Klik Terapkan ke ESP untuk menyamakan alarm alat.');
+    } catch (error) { setToast(error.message || 'Konfigurasi belum tersimpan.'); }
   }
 
   async function testTelegram() {
-    if (!telegramToken || !telegramChatId) {
-      setToast('Isi Bot Token dan Chat ID terlebih dahulu.');
-      return;
-    }
     setToast('Mengirim tes pesan ke Telegram…');
     try {
       const res = await fetch('/api/notify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          botToken: telegramToken,
-          chatId: telegramChatId,
           message: '🔔 *TES KONEKSI TELEGRAM BAYU IoT*\nStatus integrasi Webhook aktif & berhasil!',
         }),
       });
@@ -539,25 +598,20 @@ export default function MapDashboard() {
 
   async function sendDownlink(action) {
     if (pendingCommand || dataSource !== 'live') return;
-    if (user.role !== 'admin') {
-      setToast('Fitur ini memerlukan akses Administrator. Silakan login.');
+    if (!canManage) {
+      setToast('Masuk sebagai pemilik stasiun untuk mengirim perintah.');
       setAuthOpen(true);
       return;
     }
     const targetId = station?.id || 'angin-01';
-    if (!commandKey.trim()) {
-      setToast('Isi kunci perintah sebelum mengirim.');
-      document.getElementById('command-secret')?.focus();
-      return;
-    }
     setPendingCommand(action);
-    const label = { calibrate_zero: 'Kalibrasi arah utara', buzzer_mute: 'Senyapkan buzzer', buzzer_unmute: 'Aktifkan buzzer', request_telemetry: 'Perbarui pembacaan' }[action] || action;
+    const label = { calibrate_zero: 'Kalibrasi arah utara', buzzer_mute: 'Senyapkan buzzer', buzzer_unmute: 'Aktifkan buzzer', request_telemetry: 'Perbarui pembacaan', apply_settings: 'Terapkan ambang alarm' }[action] || action;
     const log = (success, message) => setCommandLogs((prev) => [{ stationId: targetId, label, success, message, time: Date.now() }, ...prev].slice(0, 40));
     setToast(`Mengirim perintah [${action}] ke ${targetId}…`);
     try {
       const res = await fetch('/api/command', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${commandKey.trim()}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, stationId: targetId }),
         signal: AbortSignal.timeout(15000),
       });
@@ -578,6 +632,22 @@ export default function MapDashboard() {
     }
   }
 
+  async function copyStationConfig(entry) {
+    const text = '// KONFIGURASI ALAT\n'
+      + 'constexpr char StationId[] = "' + entry.id + '";\n'
+      + 'constexpr char WifiSsid[] = "YOUR_WIFI";\n'
+      + 'constexpr char WifiPassword[] = "YOUR_WIFI_PASSWORD";\n'
+      + 'constexpr char MqttUsername[] = "YOUR_DEVICE_MQTT_USERNAME";\n'
+      + 'constexpr char MqttPassword[] = "YOUR_DEVICE_MQTT_PASSWORD";\n'
+      + 'constexpr char brokerUrl[] = "mqtts://g916bd01.ala.us-east-1.emqxsl.com:8883";\n';
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast('Blok konfigurasi disalin. Tempel untuk mengganti bagian konfigurasi di sketch ESP.');
+    } catch {
+      setToast('Browser belum mengizinkan penyalinan. Izinkan clipboard lalu coba lagi.');
+    }
+  }
+
   function download() {
     const rows = station ? history.filter((r) => r.id === station.id) : history;
     const url = URL.createObjectURL(new Blob([exportCsv(rows)], { type: 'text/csv;charset=utf-8;' }));
@@ -589,7 +659,7 @@ export default function MapDashboard() {
     setToast('CSV riwayat diunduh.');
   }
 
-  const alarmStation = displayStations.find((s) => s.online && s.speed >= settings.threshold);
+  const alarmStation = displayStations.find((s) => s.online && s.speed >= (s.settings?.dangerKmh ?? settings.threshold));
   const stationHistory = station ? history.filter((r) => r.id === station.id) : history;
   const stationStats = calculateStats(stationHistory);
   const stationWindRose = calculateWindRose(stationHistory);
@@ -602,7 +672,7 @@ export default function MapDashboard() {
       {/* User Auth Pill Button */}
       <button className="user-pill" onClick={() => setAuthOpen(true)} title="Kelola Akun & Akses" aria-label={user.role === 'guest' ? 'Masuk atau daftar akun' : 'Kelola akun'}>
         <Icon name="user" size={14} />
-        <span>{user.role === 'guest' ? 'Masuk / Daftar' : user.name.split(' ')[0]}</span>
+        <span>{user.role === 'guest' ? 'Masuk Akun' : user.name.split(' ')[0]}</span>
         <span className={`role-badge ${user.role}`}>{user.role}</span>
       </button>
 
@@ -617,12 +687,12 @@ export default function MapDashboard() {
             <p>Daftarkan alat dan tentukan lokasinya di peta.</p>
             <form onSubmit={addStation} className="station-form">
               <label>Nama stasiun<input autoFocus required maxLength={80} placeholder="Mis. Stasiun Lapangan Timur" value={stationDraft.name} onChange={(e) => setStationDraft({ ...stationDraft, name: e.target.value })} /></label>
-              <label>ID stasiun<input required maxLength={64} pattern="[A-Za-z0-9]+(-[A-Za-z0-9]+)*" placeholder="Mis. ANGIN-06" value={stationDraft.id} onChange={(e) => setStationDraft({ ...stationDraft, id: e.target.value })} /><small>Samakan dengan ID pada alat. Setiap stasiun harus punya ID unik.</small></label>
+              {user.role === 'admin' ? <label>ID alat yang sudah ada (opsional)<input maxLength={64} pattern="[A-Za-z0-9]+(-[A-Za-z0-9]+)*" placeholder="Kosongkan untuk ID otomatis" value={stationDraft.id} onChange={(e) => setStationDraft({ ...stationDraft, id: e.target.value })} /></label> : <p>ID alat akan dibuat otomatis dan dihubungkan ke akun Anda.</p>}
               <fieldset><legend>Koordinat cadangan</legend><div className="coordinate-fields">
                 <label>Latitude<input required type="number" step="any" min="-90" max="90" value={stationDraft.lat} onChange={(e) => setStationDraft({ ...stationDraft, lat: e.target.value })} /></label>
                 <label>Longitude<input required type="number" step="any" min="-180" max="180" value={stationDraft.lng} onChange={(e) => setStationDraft({ ...stationDraft, lng: e.target.value })} /></label>
               </div><small>Dipakai saat GPS alat belum mendapat lokasi.</small></fieldset>
-              <p className="station-storage-note">Daftar tersimpan di browser ini. Pembacaan muncul setelah alat terhubung dan mengirim data.</p>
+              <p className="station-storage-note">Stasiun tersimpan di akun Anda. Pembacaan muncul setelah alat terhubung dan mengirim data.</p>
               {stationError && <p className="station-form-error" role="alert">{stationError}</p>}
               <div className="station-form-actions"><button type="button" onClick={() => setStationFormOpen(false)}>Batal</button><button type="submit" className="primary-button"><Icon name="plus" size={16} />Tambah stasiun</button></div>
             </form>
@@ -633,47 +703,77 @@ export default function MapDashboard() {
         <div className="auth-overlay" onClick={() => setAuthOpen(false)}>
           <div className="auth-card" onClick={(e) => e.stopPropagation()}>
             <div className="auth-header">
-              <h2>{user.role === 'admin' ? 'Akun Administrator' : 'Autentikasi Pengguna'}</h2>
+              <h2>{user.role === 'admin' ? 'Kelola Akun' : user.role === 'guest' ? 'Masuk Akun' : 'Akun Saya'}</h2>
               <button className="auth-close" onClick={() => setAuthOpen(false)}>✕</button>
             </div>
 
-            {user.role === 'admin' ? (
+            {user.role !== 'guest' ? (
               <div>
                 <p style={{ fontSize: '13px', color: '#475569', marginBottom: '14px' }}>
-                  Anda masuk sebagai <b>{user.name}</b> (Role: Administrator). Anda memiliki izin penuh untuk downlink perintah ESP32, ubah ambang alarm, dan manajemen sistem.
+                  Masuk sebagai <b>{user.name}</b> ({user.role === 'admin' ? 'Administrator' : 'Pemilik stasiun'}).
                 </p>
+                {user.role === 'admin' && <div className="user-management">
+                  <h3>Akun {authStorageMode === 'local-demo' ? 'demo lokal' : 'tersimpan di Firestore'}</h3>
+                  <div className="managed-user-list">
+                    {managedUsers.map((account) => <div className="managed-user" key={account.username}>
+                      <span><b>{account.name}</b><small>{account.username} · {account.role === 'admin' ? 'Admin' : 'Pembaca'}</small></span>
+                      <button type="button" disabled={usersBusy || account.username === user.username} onClick={() => toggleManagedUser(account)}>
+                        {account.enabled ? 'Nonaktifkan' : 'Aktifkan'}
+                      </button>
+                    </div>)}
+                  </div>
+                  <form className="auth-form" onSubmit={createManagedUser}>
+                    <h3>Tambah akun</h3>
+                    <label>Username<input required minLength={3} maxLength={32} value={newUser.username} onChange={(e) => setNewUser((value) => ({ ...value, username: e.target.value }))} /></label>
+                    <label>Nama<input required maxLength={80} value={newUser.name} onChange={(e) => setNewUser((value) => ({ ...value, name: e.target.value }))} /></label>
+                    <label>Password<input type="password" required minLength={12} autoComplete="new-password" value={newUser.password} onChange={(e) => setNewUser((value) => ({ ...value, password: e.target.value }))} /></label>
+                    <label>Role<select value={newUser.role} onChange={(e) => setNewUser((value) => ({ ...value, role: e.target.value }))}><option value="viewer">Pembaca</option><option value="admin">Administrator</option></select></label>
+                    <button type="submit" className="auth-btn" disabled={usersBusy}>Buat akun</button>
+                  </form>
+                </div>}
                 <button type="button" className="auth-btn" style={{ background: '#e2e8f0', color: '#334155' }} onClick={handleLogout}>
                   Keluar Akun (Ke Mode Tamu)
                 </button>
               </div>
             ) : (
               <>
-                <nav className="auth-nav">
-                  <button className={authMode === 'login' ? 'active' : ''} onClick={() => setAuthMode('login')}>Masuk</button>
-                  <button className={authMode === 'register' ? 'active' : ''} onClick={() => setAuthMode('register')}>Daftar Akun</button>
-                </nav>
+                <button type="button" className="auth-btn google-login" disabled={googleBusy} onClick={handleGoogleLogin}>{googleBusy ? 'Menghubungkan Google…' : 'Masuk / Daftar dengan Google'}</button>
+                <p className="auth-hint">Login pertama membuat akun BAYU. Stasiun terhubung ke akun yang sama.</p>
                 <form className="auth-form" onSubmit={handleAuthSubmit}>
-                  {authMode === 'register' && (
-                    <label>Nama Lengkap
-                      <input type="text" required placeholder="Contoh: Tim Lapangan" value={authName} onChange={(e) => setAuthName(e.target.value)} />
-                    </label>
-                  )}
                   <label>Username
-                    <input type="text" required placeholder="admin atau username Anda" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} />
+                    <input required autoComplete="username" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} />
                   </label>
                   <label>Password
-                    <input type="password" required placeholder="Password / PIN" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} />
+                    <input type="password" required autoComplete="current-password" placeholder="Password akun" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} />
                   </label>
-                  <button type="submit" className="auth-btn">
-                    {authMode === 'login' ? 'Masuk ke Sistem' : 'Daftarkan Akun'}
-                  </button>
+                  <button type="submit" className="auth-btn">Masuk ke Sistem</button>
                   <div className="auth-hint">
-                    💡 <b>Kredensial Bawaan:</b> Gunakan user <code>admin</code> dan password <code>bayu0098</code> untuk akses administrator hardware langsung.
+                    {authStorageMode === 'local-demo' ? 'Mode demo lokal. Akun disimpan hanya di komputer ini.' : 'Akun disimpan di Firestore.'} Admin dapat menambah akun pembaca dan admin lain setelah masuk.
                   </div>
                 </form>
               </>
             )}
           </div>
+        </div>
+      )}
+
+      {registrationInfo && (
+        <div className="auth-overlay" onClick={() => setRegistrationInfo(null)}>
+          <section className="auth-card provisioning-dialog" role="dialog" aria-modal="true" aria-labelledby="provisioning-title" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => {
+            if (event.key !== 'Tab') return;
+            const controls = event.currentTarget.querySelectorAll('button:not(:disabled)');
+            const first = controls[0], last = controls[controls.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+          }}>
+            <div className="auth-header"><h2 id="provisioning-title">Hubungkan stasiun</h2><button type="button" className="auth-close" aria-label="Tutup konfigurasi stasiun" autoFocus onClick={() => setRegistrationInfo(null)}>✕</button></div>
+            <p>{registrationInfo.name} · {registrationInfo.id}</p>
+            <p>Buat akun MQTT khusus alat ini di EMQX. Batasi akses ke topik stasiun di bawah, lalu tempel blok konfigurasi pada bagian atas sketch ESP.</p>
+            <pre className="provisioning-code">{JSON.stringify(registrationInfo.topics, null, 2)}</pre>
+            <button className="auth-btn" onClick={() => copyStationConfig(registrationInfo)}>Salin blok konfigurasi ESP</button>
+            <p className="auth-hint">Isi Wi-Fi dan kredensial MQTT pada blok konfigurasi sebelum upload. Status online muncul setelah telemetri pertama diterima.</p>
+            <button type="button" className="primary-button provisioning-done" onClick={() => setRegistrationInfo(null)}>Selesai</button>
+          </section>
         </div>
       )}
 
@@ -779,7 +879,7 @@ export default function MapDashboard() {
           <div className="panel-actions">
             <button onClick={() => setFocusRequest((v) => v + 1)}><Icon name="locate" size={17} />Fokus lokasi</button>
             <button onClick={download}><Icon name="download" size={17} />Unduh CSV</button>
-            {station.custom && user.role === 'admin' && <button className="delete-station-btn" aria-label="Hapus stasiun" title="Hapus stasiun" disabled={Boolean(pendingCommand)} onClick={deleteStation}><Icon name="trash" size={17} />Hapus</button>}
+            {station.custom && !station.registered && user.role === 'admin' && <button className="delete-station-btn" aria-label="Hapus stasiun" title="Hapus stasiun" disabled={Boolean(pendingCommand)} onClick={deleteStation}><Icon name="trash" size={17} />Hapus</button>}
           </div>
 
           <nav className="detail-tabs" aria-label="Detail stasiun">
@@ -801,7 +901,7 @@ export default function MapDashboard() {
                 <section className="wind-stat">
                   <div className="stat-label">Kecepatan angin{!station.online && <span>Data terakhir</span>}</div>
                   <div className="speed-number">{format(station.speed)}<span>km/jam</span></div>
-                  <div className="speed-secondary">{format(station.speed / 3.6)} m/s <span>·</span> {station.speed >= settings.threshold ? 'Melewati ambang alarm' : 'Di bawah ambang alarm'}</div>
+                  <div className="speed-secondary">{format(station.speed / 3.6)} m/s <span>·</span> {station.speed >= (station.settings?.dangerKmh ?? settings.threshold) ? 'Melewati ambang alarm' : 'Di bawah ambang alarm'}</div>
                 </section>
 
                 <section className="direction-stat">
@@ -849,24 +949,28 @@ export default function MapDashboard() {
                 <div className="health-box">
                   <div className="health-title">
                     <span>Diagnostik Kesehatan Alat</span>
-                    <small>{station.online ? 'Kondisi Prima' : 'Perlu Pengecekan'}</small>
+                      <small>{station.source === 'mqtt' ? 'Nilai dari telemetri alat' : 'Belum ada telemetri alat'}</small>
                   </div>
                   <div className="health-grid">
                     <div className="health-item">
                       <small>Wi-Fi RSSI</small>
-                      <b>{deviceHealth.wifiRssi} dBm ({deviceHealth.wifiStatus})</b>
+                      <b>{deviceHealth.wifiRssi === null ? deviceHealth.wifiStatus : `${deviceHealth.wifiRssi} dBm (${deviceHealth.wifiStatus})`}</b>
                     </div>
                     <div className="health-item">
                       <small>Sensor AS5600</small>
                       <b>{deviceHealth.as5600Status}</b>
                     </div>
                     <div className="health-item">
-                      <small>ESP-NOW Loss</small>
+                      <small>Kehilangan paket</small>
                       <b>{deviceHealth.espNowLoss}</b>
                     </div>
                     <div className="health-item">
                       <small>Heap ESP32</small>
-                      <b>{deviceHealth.heapKb} KB Bebas</b>
+                      <b>{deviceHealth.heapKb === null ? 'Belum tersedia' : `${deviceHealth.heapKb} KB bebas`}</b>
+                    </div>
+                    <div className="health-item">
+                      <small>Uptime ESP32</small>
+                      <b>{deviceHealth.uptime}</b>
                     </div>
                     <div className="health-item">
                       <small>Status GPS</small>
@@ -878,7 +982,7 @@ export default function MapDashboard() {
                 <dl className="device-details">
                   <div><dt>Baterai luar</dt><dd>{Number.isFinite(station.battery) ? <><span className="battery-icon"><i style={{ width: `${station.battery}%`, background: station.battery <= settings.batteryThreshold ? '#cb9227' : '#39826d' }} /></span>{station.battery}%</> : 'Belum tersedia'}</dd></div>
                   <div><dt>Hubungan jaringan</dt><dd>{station.online ? 'Terhubung' : 'Terputus'}</dd></div>
-                  <div><dt>Ambang alarm</dt><dd>{settings.threshold} km/jam</dd></div>
+                  <div><dt>Ambang alarm</dt><dd>{station.settings?.dangerKmh ?? settings.threshold} km/jam</dd></div>
                   <div><dt>Sumber telemetri</dt><dd>{station.source === 'mqtt' ? 'MQTT TLS 8883' : 'Simulasi Internal'}</dd></div>
                   {station.ageSeconds !== undefined && (
                     <div><dt>Usia paket data</dt><dd>{station.ageSeconds} dtk lalu</dd></div>
@@ -911,7 +1015,8 @@ export default function MapDashboard() {
             {tab === 'history' && (
               <section className="history-section">
                 <h2>Riwayat & Analitik</h2>
-                <p>{station.source === 'mqtt' ? 'Data telemetri langsung dari hardware IoT.' : 'Selama sesi halaman ini dibuka.'}</p>
+                <p>{dataSource === 'live' ? 'Riwayat tersimpan di Firestore dan pembacaan terbaru dari alat.' : 'Selama sesi halaman ini dibuka.'}</p>
+                {dataSource === 'live' && historyLoadError && <p role="status">Riwayat tersimpan belum bisa dimuat. Data yang tampil hanya dari sesi ini; periksa kredensial Firebase pada server.</p>}
 
                 <div className="stats-grid">
                   <div className="stat-card">
@@ -970,18 +1075,18 @@ export default function MapDashboard() {
               <section className="control-box">
                 <div className="control-heading"><div><span className="section-eyebrow">AKSES PERANGKAT</span><h2>Kontrol stasiun</h2></div><span className={`connection-pill ${dataSource === 'live' && station.online ? 'connected' : ''}`}><i />{dataSource === 'simulation' ? 'Simulasi' : station.online ? 'Terhubung' : 'Offline'}</span></div>
                 <p className="control-intro">Kelola sensor dan alarm pada {station.id}.</p>
-                {dataSource === 'simulation' ? <div className="control-notice">Beralih ke Live IoT untuk mengirim perintah ke alat.</div> : user.role !== 'admin' ? <div className="control-notice"><span>Kontrol alat memerlukan akses admin.</span><button onClick={() => setAuthOpen(true)}>Masuk<Icon name="chevron" size={13} /></button></div> : <label className="command-key-label" htmlFor="command-secret">Kunci perintah<input id="command-secret" type="password" autoComplete="off" placeholder="Masukkan kunci akses alat" value={commandKey} onChange={(e) => setCommandKey(e.target.value)} /><small>Hanya dipakai selama halaman ini terbuka.</small></label>}
+                {dataSource === 'simulation' ? <div className="control-notice">Beralih ke Live IoT untuk mengirim perintah ke alat.</div> : !canManage ? <div className="control-notice"><span>Kontrol alat memerlukan akun pemilik stasiun.</span><button onClick={() => setAuthOpen(true)}>Masuk<Icon name="chevron" size={13} /></button></div> : <p className="control-notice">Perintah dikirim melalui koneksi aman dan menunggu konfirmasi alat.</p>}
                 <div className="command-actions" aria-busy={Boolean(pendingCommand)}>
                   {[
                     { action: 'calibrate_zero', icon: 'locate', label: 'Kalibrasi arah utara', description: 'Arahkan bilah ke utara, lalu klik untuk menyimpan 0°.' },
                     { action: buzzerMuted[station.id] ? 'buzzer_unmute' : 'buzzer_mute', icon: 'mute', label: buzzerMuted[station.id] ? 'Aktifkan buzzer' : 'Senyapkan buzzer', description: buzzerMuted[station.id] ? 'Kirim permintaan untuk menyalakan alarm.' : 'Kirim permintaan untuk mematikan suara alarm.' },
                     { action: 'request_telemetry', icon: 'refresh', label: 'Perbarui pembacaan', description: 'Minta data terbaru dari stasiun.' },
-                  ].map((item) => <button key={item.action} type="button" className="command-btn" disabled={user.role !== 'admin' || dataSource !== 'live' || Boolean(pendingCommand)} onClick={() => sendDownlink(item.action)}><span className="command-icon"><Icon name={item.icon} size={19} /></span><span className="command-copy"><b>{item.label}</b><small>{pendingCommand === item.action ? 'Mengirim perintah…' : item.description}</small></span>{pendingCommand === item.action ? <span className="command-spinner" /> : <Icon name="chevron" size={15} />}</button>)}
+                  ].map((item) => <button key={item.action} type="button" className="command-btn" disabled={!canManage || dataSource !== 'live' || Boolean(pendingCommand)} onClick={() => sendDownlink(item.action)}><span className="command-icon"><Icon name={item.icon} size={19} /></span><span className="command-copy"><b>{item.label}</b><small>{pendingCommand === item.action ? 'Mengirim perintah…' : item.description}</small></span>{pendingCommand === item.action ? <span className="command-spinner" /> : <Icon name="chevron" size={15} />}</button>)}
                 </div>
                 <p className="command-caption">Arahkan bilah ke utara sebelum mengirim. Web menunggu konfirmasi dari ESP.</p>
                 <div className="command-history-heading"><h3>Aktivitas perintah</h3><span>Sesi ini</span></div>
                 <div className="command-log" role="log" aria-label="Aktivitas perintah stasiun" aria-live="polite">
-                  {commandLogs.some((entry) => entry.stationId === station.id) ? commandLogs.filter((entry) => entry.stationId === station.id).slice(0, 10).map((entry, i) => <div className="command-entry" key={`${entry.time}-${i}`}><i className={entry.success ? 'queued' : 'failed'} /><div><b>{entry.label}</b><small>{entry.success ? entry.label === 'Kalibrasi arah utara' ? 'Dikonfirmasi ESP' : 'Masuk antrean' : entry.message || 'Gagal dikirim'}</small></div><time>{timeLabel(entry.time)}</time></div>) : <div className="command-empty"><Icon name="radio" size={22} /><span>Belum ada aktivitas<small>Perintah yang dikirim akan muncul di sini.</small></span></div>}
+                  {commandLogs.some((entry) => entry.stationId === station.id) ? commandLogs.filter((entry) => entry.stationId === station.id).slice(0, 10).map((entry, i) => <div className="command-entry" key={`${entry.time}-${i}`}><i className={entry.success ? 'queued' : 'failed'} /><div><b>{entry.label}</b><small>{entry.success ? 'Dikonfirmasi ESP' : entry.message || 'Gagal dikirim'}</small></div><time>{timeLabel(entry.time)}</time></div>) : <div className="command-empty"><Icon name="radio" size={22} /><span>Belum ada aktivitas<small>Perintah yang dikirim akan muncul di sini.</small></span></div>}
                 </div>
               </section>
             )}
@@ -989,8 +1094,11 @@ export default function MapDashboard() {
             {tab === 'settings' && (
               <section className="settings-section">
                 <h2>Ambang Peringatan</h2>
-                <p>Berlaku untuk seluruh titik stasiun.</p>
+                <p>Disimpan per stasiun. Terapkan ke ESP agar ambang alarm alat mengikuti pengaturan ini.</p>
                 <form onSubmit={saveSettings}>
+                  <label>Ambang waspada (km/jam)<input type="number" min="0" max="199" required value={warningThreshold} onChange={(e) => setWarningThreshold(e.target.value)} /></label>
+                  <label>Koreksi arah virtual (derajat)<input type="number" min="-360" max="360" step="0.1" value={directionOffset} onChange={(e) => setDirectionOffset(e.target.value)} /></label>
+                  <p>Contoh +180° mengubah arah utara menjadi selatan pada dashboard. Data arah asli tetap tersimpan.</p>
                   <label>Kecepatan angin (km/jam)
                     <input type="number" min="1" max="120" required value={threshold} onChange={(event) => setThreshold(event.target.value)} />
                   </label>
@@ -1024,17 +1132,7 @@ export default function MapDashboard() {
                   <h3 style={{ fontSize: '13px', fontWeight: 600, color: '#1e293b', marginTop: '16px', marginBottom: '4px' }}>
                     Notifikasi Telegram Bot
                   </h3>
-                  <div className="toggle-row">
-                    <label htmlFor="tg-alert">Aktifkan Peringatan Telegram</label>
-                    <input id="tg-alert" type="checkbox" checked={telegramEnabled} onChange={(e) => setTelegramEnabled(e.target.checked)} />
-                  </div>
-
-                  <label>Bot Token Telegram
-                    <input type="text" placeholder="123456:ABC-DEF..." value={telegramToken} onChange={(e) => setTelegramToken(e.target.value)} />
-                  </label>
-                  <label>Chat ID Telegram
-                    <input type="text" placeholder="-100... atau ID Pengguna" value={telegramChatId} onChange={(e) => setTelegramChatId(e.target.value)} />
-                  </label>
+                  <p>Telegram diatur di server dan worker. Peringatan tetap berjalan saat dashboard ditutup.</p>
 
                   <button type="button" className="remote-btn" style={{ width: '100%', marginBottom: '14px' }} onClick={testTelegram}>
                     🧪 Tes Kirim Pesan ke Telegram
@@ -1045,8 +1143,10 @@ export default function MapDashboard() {
                   </label>
 
                   <button type="submit" className="primary-button">Simpan Pengaturan</button>
+                  <button type="button" className="primary-button provisioning-done" disabled={!canManage || Boolean(pendingCommand)} onClick={() => sendDownlink('apply_settings')}>{pendingCommand === 'apply_settings' ? 'Menunggu konfirmasi ESP…' : 'Terapkan ambang tersimpan ke ESP'}</button>
                 </form>
 
+                <button type="button" className="primary-button" disabled={!canManage || !station.registered} onClick={() => setRegistrationInfo({ ...station, id: station.id.toLowerCase(), topics: { telemetry: `bayu/stations/${station.id.toLowerCase()}/telemetry`, command: `bayu/stations/${station.id.toLowerCase()}/cmd`, configuration: `bayu/stations/${station.id.toLowerCase()}/config`, acknowledgement: `bayu/stations/${station.id.toLowerCase()}/ack` } })}>Konfigurasi koneksi alat</button>
                 <h2 className="scenario-heading">Coba Kondisi Alat</h2>
                 <div className="scenario-options">
                   {[['normal', 'Normal'], ['alarm', 'Angin kencang'], ['battery', 'Baterai lemah'], ['offline', 'Data terputus']].map(([scenario, title]) => (

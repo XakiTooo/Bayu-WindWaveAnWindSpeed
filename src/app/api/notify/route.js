@@ -1,3 +1,5 @@
+import { sameOrigin } from '@/lib/admin-session.mjs';
+import { currentUser } from '@/lib/auth-store.mjs';
 export const runtime = 'nodejs';
 
 const headers = {
@@ -6,12 +8,18 @@ const headers = {
 };
 
 export async function POST(request) {
+  if (!sameOrigin(request)) return Response.json({ error: 'Sesi admin tidak valid.' }, { status: 403, headers });
+  let user;
+  try { user = await currentUser(request); } catch { return Response.json({ error: 'Database akun belum tersedia.' }, { status: 503, headers }); }
+  if (user?.role !== 'admin') return Response.json({ error: 'Sesi admin tidak valid.' }, { status: 403, headers });
   try {
     const body = await request.json();
-    const { botToken, chatId, message, stationId, speed, threshold } = body;
+    const { message, stationId, speed, threshold } = body;
+    const botToken = process.env.BAYU_TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.BAYU_TELEGRAM_CHAT_ID;
 
     if (!botToken || !chatId) {
-      return Response.json({ error: 'Token Bot Telegram dan Chat ID wajib diisi.' }, { status: 400, headers });
+      return Response.json({ error: 'Telegram belum dikonfigurasi pada server.' }, { status: 503, headers });
     }
 
     const text = message || (
