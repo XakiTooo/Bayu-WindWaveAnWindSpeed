@@ -10,3 +10,4 @@ out/
 !.env.example
 *.log
 firmware/**/config.h
+.local-data/

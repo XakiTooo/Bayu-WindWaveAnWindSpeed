@@ -4,6 +4,21 @@
 
 Dashboard pemantau kecepatan dan arah angin cerdas berbasis **Next.js (App Router), React, Leaflet, MQTT over TLS, dan Firebase**. Proyek ini mengintegrasikan sensor fisik stasiun cuaca lapangan (*anemometer optik/Hall A3144*, *sensor arah angin magnetik AS5600*, dan *GPS Neo-6M*) dengan pemantauan *real-time* berbasis web.
 
+**Konfigurasi terkini:** Salin `.env.example` ke `.env.local` dan isi `BAYU_ADMIN_PASSWORD` (minimal 12 karakter) untuk membuat akun admin pertama saat login. Pada workspace lokal ini nilainya sudah dibuat secara acak di `.env.local`; baca nilainya di sana untuk login pertama. Server dashboard memerlukan `FIREBASE_SERVICE_ACCOUNT_JSON` atau `GOOGLE_APPLICATION_CREDENTIALS` agar akun, sesi, dan riwayat Firestore berfungsi. Setelah akun admin dibuat, password dan role dibaca dari Firestore; nilai bootstrap tidak dipakai lagi. Worker menyimpan sampel setiap menit. Jika riwayat belum bisa dibaca, dashboard menampilkan data sesi saat ini. Kredensial Wi-Fi/MQTT yang pernah ditulis di sketch lama perlu diganti di perangkat dan broker sebelum dipakai lagi.
+
+**Mode demo lokal:** `BAYU_LOCAL_AUTH=1` pada `.env.local` mengaktifkan akun dummy hanya saat `npm run dev` dan hanya jika kredensial Firebase Admin belum tersedia. Admin pertama tetap memakai username `admin` dan `BAYU_ADMIN_PASSWORD`; akun serta sesi tersimpan di `.local-data/auth.json` (diabaikan Git). Mode ini tidak aktif pada build/server produksi. Kalibrasi dari dashboard tetap menggunakan broker MQTT dan firmware fisik, sehingga keberhasilannya memerlukan ACK dari ESP. Jangan arahkan sensor ke utara setelah menekan tombol; posisikan sebelum menekan kalibrasi.
+
+`START_BAYU_DASHBOARD.bat` otomatis memakai `npm run dev` saat mode demo aktif. Skrip menampilkan alamat dashboard dan membiarkan Anda membuka browser sendiri.
+
+### Menyiapkan database akun
+
+1. Di Firebase Console, buka proyek BAYU yang sudah dipakai untuk telemetri. Jika Firestore belum dibuat, buka **Databases & Storage → Firestore → Create database**, pilih lokasi dan **Production mode**.
+2. Buka **Project settings → Service accounts → Generate new private key**. Simpan file JSON di luar repositori; jangan kirim private key lewat chat atau commit ke Git.
+3. Isi `GOOGLE_APPLICATION_CREDENTIALS` di `.env.local` dengan path absolut file JSON tersebut. Pastikan `FIREBASE_DATABASE_URL` menunjuk ke proyek Firebase yang sama. Restart `npm run dev`.
+4. Login dengan username `admin` dan nilai `BAYU_ADMIN_PASSWORD` dari `.env.local`. Login pertama membuat dokumen `dashboardUsers/admin`; sesi tersimpan di `dashboardSessions`. Gunakan **Kelola Akun** untuk membuat akun pembaca/admin lain dan menonaktifkannya.
+
+Sesi memakai token acak yang hash-nya tersimpan di Firestore, berlaku 12 jam. Password tersimpan sebagai hash scrypt. Lima kegagalan login mengunci akun selama 15 menit. Dokumen sesi kadaluarsa dapat dibersihkan dengan kebijakan TTL Firestore pada field `expiresAt`.
+
 ---
 
 ## 🌐 Akses Dashboard
@@ -80,7 +95,7 @@ Dashboard pemantau kecepatan dan arah angin cerdas berbasis **Next.js (App Route
 ### 8. Autentikasi Pengguna & Role-Based Access Control (RBAC)
 - **Role Tamu (Guest):** Akses publik *read-only* untuk memantau cuaca, grafik, dan peta tanpa risiko mengubah konfigurasi sistem.
 - **Role Administrator:** Akses penuh untuk mengirim kontrol downlink hardware, mengubah ambang batas bahaya, mengatur webhook, dan ekspor data.
-- Dilengkapi sistem login & registrasi akun baru yang tersimpan persisten.
+- Akun dan sesi disimpan di Firestore (`dashboardUsers` dan `dashboardSessions`). Password memakai hash scrypt; cookie sesi HttpOnly. Admin dapat membuat dan menonaktifkan akun pembaca atau admin lain.
 
 ### 9. Ekspor Data Laporan (CSV)
 - Unduh seluruh riwayat telemetri dalam format CSV standar.
@@ -98,18 +113,11 @@ Untuk menerima pesan bahaya langsung di ponsel saat kecepatan angin melebihi amb
 2. Simpan **HTTP API Bot Token** yang diberikan (contoh: `7123456789:AAFx...`).
 3. Mulai obrolan dengan bot Anda, lalu klik tombol **/start**.
 4. Dapatkan **Chat ID** Anda melalui bot `@userinfobot` atau `@getmyid_bot` (contoh: `123456789`).
-5. Buka Dashboard BAYU -> Masuk tab **Pengaturan** -> Centang *Aktifkan Peringatan Telegram*.
-6. Tempelkan Bot Token dan Chat ID, lalu klik **🧪 Tes Kirim Pesan ke Telegram** untuk memastikan koneksi berhasil.
+5. Isi `BAYU_TELEGRAM_BOT_TOKEN`, `BAYU_TELEGRAM_CHAT_ID`, dan `BAYU_ALERT_THRESHOLD_KMH` pada lingkungan worker. Isi token dan chat ID yang sama pada server dashboard untuk tombol tes.
+6. Jalankan worker. Peringatan dikirim dari worker meski halaman dashboard ditutup; tombol tes tersedia untuk administrator.
 
 ### 2. Downlink MQTT pada Firmware ESP32
-Agar perintah kontrol dari web dapat dieksekusi secara fisik oleh alat:
-- Pastikan firmware `02_Penerima_Dalam.ino` menambahkan *subscription* ke topik kontrol:
-  ```cpp
-  client.subscribe("bayu/stations/angin-01/command");
-  ```
-- Di dalam callback MQTT `02_Penerima_Dalam.ino`, teruskan perintah via ESP-NOW / serial ke `01_Pengirim_Luar.ino`:
-  - Perintah `calibrate_zero`: ESP-NOW kirim karakter `'z'` untuk kalibrasi nol sensor AS5600.
-  - Perintah `buzzer_mute`: Set output pin buzzer ke `LOW`.
+Agar perintah kontrol dari web bekerja, upload firmware pengirim terbaru. Node pengirim berlangganan `bayu/stations/angin-01/cmd` dan mengirim konfirmasi ke `bayu/stations/angin-01/ack`. Node penerima berlangganan topik `cmd` untuk menyamakan status mute.
 
 ### 3. Modul GPS Fisik (Neo-6M)
 - Modul GPS membutuhkan sinyal satelit langsung (berada di luar ruangan atau dekat jendela terbuka).
@@ -137,9 +145,9 @@ Untuk menghubungkan broker EMQX Cloud ke database Firebase:
 
 | Item | Nilai Default | Keterangan |
 |---|---|---|
-| **Akun Admin Dashboard** | User: `admin` \| Password: `bayu0098` | Akses penuh kontrol downlink & pengaturan |
+| **Akun Admin Dashboard** | `BAYU_ADMIN_PASSWORD` | Password bootstrap satu kali untuk akun `admin`; akun berikutnya dikelola dari dashboard |
 | **API Telemetry Share Key** | `BAYU_TELEMETRY_SHARE_KEY` | Kunci baca untuk `/api/check-data`, diisi pada pengaturan Live dashboard |
-| **Command Secret** | `BAYU_COMMAND_SECRET` | Kunci server terpisah untuk mengantrekan perintah stasiun |
+| **Kontrol alat** | Sesi admin + MQTT TLS | Perintah dianggap berhasil setelah ACK dari ESP |
 | **Broker MQTT** | `g916bd01.ala.us-east-1.emqxsl.com` | EMQX Cloud Server |
 | **Port MQTT** | `8883` (TLS) / `8084` (WSS) | Enkripsi aman TLS v1.2/v1.3 |
 | **Topik Telemetri** | `bayu/stations/angin-01/telemetry` | Jalur publikasi data alat |
@@ -172,7 +180,7 @@ Proyek ini dilengkapi rangkaian pengujian unit otomatis (*zero-dependency* nativ
 ```bash
 npm test
 ```
-*Hasil: 12/12 unit test validasi telemetri, GPS, komparasi, ekspor CSV, dan kalkulasi mawar angin lulus 100%.*
+Tes mencakup telemetri, GPS, simulasi, ekspor CSV, dan sesi admin.
 
 ### 4. Melakukan Kompilasi Produksi (Production Build)
 ```bash
@@ -204,7 +212,7 @@ Dashboard-Bayu/
 │       ├── simulation.mjs            # Logika telemetri, mawar angin, analitik & simulasi
 │       └── telemetry.mjs             # Validator skema data hardware
 ├── tests/
-│   └── simulation.test.mjs           # Unit test otomatis (12 skenario pengujian)
+│   └── simulation.test.mjs           # Unit test otomatis
 ├── worker/
 │   └── index.mjs                     # Background daemon subscriber MQTT ke Firebase
 ├── package.json                      # Konfigurasi dependensi dan scripts npm
@@ -219,9 +227,9 @@ Masuk sebagai admin, lalu klik tombol **+** di kolom pencarian atau **Tambah sta
 
 Untuk menghapus stasiun tambahan, pilih titiknya lalu klik **Hapus** dan konfirmasi. Titik, konfigurasi, dan riwayat sesi stasiun tersebut dihapus dari browser ini; data alat di server tetap tersimpan. Stasiun bawaan tidak dapat dihapus.
 
-Alat harus mengirim telemetri dengan ID yang sesuai ke `bayu/stations/angin-06/telemetry`. Dashboard membaca setiap stasiun secara terpisah melalui `/api/check-data?stationId=angin-06`. Stasiun baru tampil offline sampai menerima data; lokasi menggunakan koordinat cadangan saat GPS belum terkunci. Broker perlu memberi izin membaca topik stasiun tersebut.
+Alat harus mengirim telemetri dengan ID yang sesuai ke `bayu/stations/angin-06/telemetry`. Dashboard membaca setiap stasiun secara terpisah melalui `/api/check-data?stationId=angin-06` dengan kunci baca pada header `x-bayu-read-key`. Stasiun baru tampil offline sampai menerima data; lokasi menggunakan koordinat cadangan saat GPS belum terkunci. Broker perlu memberi izin membaca topik stasiun tersebut.
 
-Pada tab **Kontrol Alat**, isi `BAYU_COMMAND_SECRET` dari `.env.local` pada kolom **Kunci perintah**. Kunci ini berbeda dari `BAYU_TELEMETRY_SHARE_KEY`. Sebelum upload firmware pengirim, salin `firmware/AeroSense_Sensor_Pengirim/config.example.h` menjadi `config.h` di folder yang sama, lalu isi Wi-Fi dan kredensial MQTT. Untuk kalibrasi utara, arahkan bilah sensor ke utara lalu klik **Kalibrasi arah utara**. Dashboard mengirim `calibrate_zero` langsung ke topik MQTT `bayu/stations/<id>/cmd`; firmware pengirim yang telah di-upload ulang menyimpan sudut saat itu sebagai 0° lalu membalas ke `bayu/stations/<id>/ack`. Web hanya menampilkan sukses setelah menerima konfirmasi dari ESP. Restart server dashboard setelah mengubah `.env.local`, dan pastikan `MQTT_URL`, `MQTT_USERNAME`, `MQTT_PASSWORD`, serta `MQTT_CA_FILE` tersedia di server. Cek Serial Monitor ESP untuk pesan **KALIBRASI UTARA SUKSES**. Perintah lain masih memakai antrean Firebase dan pelaksanaannya bergantung pada dukungan alat.
+Pada tab **Kontrol Alat**, masuk sebagai administrator. Sebelum upload firmware, salin `config.example.h` menjadi `config.h` pada folder firmware yang digunakan, lalu isi Wi-Fi dan kredensial MQTT baru. Dashboard mengirim `calibrate_zero`, `buzzer_mute`, `buzzer_unmute`, dan `request_telemetry` langsung ke `bayu/stations/<id>/cmd`; web hanya menampilkan sukses setelah menerima ACK dari firmware pengirim di `bayu/stations/<id>/ack`. Firmware pengirim terbaru harus di-upload untuk perintah ini. Restart server setelah mengubah `.env.local`, dan pastikan `MQTT_URL`, `MQTT_USERNAME`, `MQTT_PASSWORD`, serta `MQTT_CA_FILE` tersedia.
 
 ## 👥 Pengembang
 

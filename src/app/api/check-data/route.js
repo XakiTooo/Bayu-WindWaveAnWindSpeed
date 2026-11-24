@@ -61,7 +61,7 @@ ensureMqtt();
 
 function authorized(request) {
   const secret = process.env.BAYU_TELEMETRY_SHARE_KEY;
-  const supplied = new URL(request.url).searchParams.get('key');
+  const supplied = request.headers.get('x-bayu-read-key');
   if (!secret || !supplied || secret.length !== supplied.length) return false;
   const expected = Buffer.from(secret);
   const actual = Buffer.from(supplied);
@@ -116,6 +116,11 @@ export async function GET(request) {
       ...(lat !== undefined ? { lat, lon, lng: lon } : {}),
       battery: latestMqttPacket.battery,
       rawStatus: latestMqttPacket.status,
+      rssi: latestMqttPacket.rssi,
+      uptime_s: latestMqttPacket.uptime_s,
+      heap_kb: latestMqttPacket.heap_kb,
+      packet_id: latestMqttPacket.packet_id,
+      is_muted: latestMqttPacket.is_muted,
     }, { headers });
   }
 
@@ -147,6 +152,7 @@ export async function GET(request) {
   // 3. Cadangan Terakhir: Upstream Vercel
   const upstreamUrl = new URL('https://bayu-windwave-and-windspeed.vercel.app/api/check-data');
   upstreamUrl.searchParams.set('stationId', stationId);
+  // The deployed older endpoint still expects a query key; the browser never sees this request.
   upstreamUrl.searchParams.set('key', shareKey);
   if (new URL(request.url).hostname === upstreamUrl.hostname) {
     return Response.json({ error: 'Data belum bisa dibaca.' }, { status: 503, headers });
@@ -154,6 +160,7 @@ export async function GET(request) {
   try {
     const upstream = await fetch(upstreamUrl, {
       cache: 'no-store',
+      headers: { 'x-bayu-read-key': shareKey },
       signal: AbortSignal.timeout(5000),
     });
     if (upstream.ok) {

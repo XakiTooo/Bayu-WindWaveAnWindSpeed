@@ -49,7 +49,7 @@ export function exportCsv(rows) {
       row.id,
       Number(row.speed).toFixed(2),
       Number(row.angle).toFixed(1),
-      row.battery ?? 100,
+      row.battery ?? '',
       row.lat,
       row.lng,
       row.dataType || (row.source === 'mqtt' ? 'HARDWARE_REAL' : 'SIMULASI')
@@ -116,48 +116,21 @@ export function calculateWindRose(recordsList) {
 }
 
 export function getDeviceHealth(station) {
-  if (!station) {
-    return {
-      wifiRssi: -72,
-      wifiStatus: 'Baik',
-      as5600Status: 'Normal (Magnet OK)',
-      espNowLoss: '0.0%',
-      uptime: '3j 45m',
-      heapKb: 178,
-      gpsStatus: 'Lock (Kampus UPN)',
-    };
-  }
-  const isOnline = Boolean(station.online);
-  const isMqtt = station.source === 'mqtt';
-  const hasGpsFix = station.gpsInfo ? station.gpsInfo.fix : false;
-  const sats = station.gpsInfo ? station.gpsInfo.sats : 0;
+  const live = station?.source === 'mqtt' && station.online;
+  const rssi = live && Number.isFinite(station.rssi) ? station.rssi : null;
+  const uptime = live && Number.isFinite(station.uptimeSeconds) ? station.uptimeSeconds : null;
+  const heap = live && Number.isFinite(station.heapKb) ? station.heapKb : null;
+  const hasGpsFix = station?.gpsInfo?.fix === true;
+  const sats = station?.gpsInfo?.sats;
   return {
-    wifiRssi: isOnline ? (isMqtt ? -64 : -70) : -95,
-    wifiStatus: !isOnline ? 'Terputus' : (isMqtt ? 'Sangat Baik' : 'Baik'),
-    as5600Status: isOnline ? 'Normal (Magnet OK)' : 'Sensor Offline',
-    espNowLoss: isOnline ? (isMqtt ? '0.1%' : '0.0%') : '100%',
-    uptime: isOnline ? '5j 18m' : '—',
-    heapKb: isOnline ? 186 : 0,
-    gpsStatus: hasGpsFix ? `Satelit Terkunci (${sats} Sats)` : 'GPS belum terkunci (lokasi cadangan)',
+    wifiRssi: rssi,
+    wifiStatus: !station?.online ? 'Terputus' : rssi === null ? 'Belum tersedia' : rssi >= -67 ? 'Baik' : rssi >= -80 ? 'Cukup' : 'Lemah',
+    as5600Status: 'Belum dilaporkan alat',
+    espNowLoss: 'Belum dilaporkan alat',
+    uptime: uptime === null ? 'Belum tersedia' : `${Math.floor(uptime / 3600)}j ${Math.floor(uptime % 3600 / 60)}m`,
+    heapKb: heap,
+    gpsStatus: hasGpsFix ? `Satelit terkunci (${Number.isFinite(sats) ? sats : '?'} satelit)` : 'GPS belum terkunci',
   };
-}
-
-export function validateUserLogin(username, password, storedUsers = []) {
-  const cleanUser = String(username || '').trim().toLowerCase();
-  const cleanPass = String(password || '').trim();
-
-  // Default hardcoded admin (matching hardware gateway password)
-  if (cleanUser === 'admin' && cleanPass === 'bayu0098') {
-    return { valid: true, user: { username: 'admin', role: 'admin', name: 'Administrator BAYU' } };
-  }
-
-  // Check stored registered accounts in localStorage
-  const found = storedUsers.find((u) => u.username.toLowerCase() === cleanUser && u.password === cleanPass);
-  if (found) {
-    return { valid: true, user: { username: found.username, role: found.role || 'user', name: found.name || found.username } };
-  }
-
-  return { valid: false, error: 'Username atau password salah.' };
 }
 
 export function updateStationFromTelemetry(station, telemetry) {
@@ -178,7 +151,7 @@ export function updateStationFromTelemetry(station, telemetry) {
     lat = telemetry.lat;
     lng = telemetry.lng ?? telemetry.lon;
   }
-  const samples = station.samples ? [...station.samples.slice(1), speed] : [speed];
+  const samples = updated === station.updated ? station.samples : station.samples ? [...station.samples.slice(1), speed] : [speed];
 
   return {
     ...station,
@@ -192,5 +165,10 @@ export function updateStationFromTelemetry(station, telemetry) {
     source: telemetry.source || 'mqtt',
     ageSeconds: telemetry.ageSeconds,
     gpsInfo: telemetry.gps,
+    battery: Number.isFinite(telemetry.battery) ? telemetry.battery : null,
+    rssi: Number.isFinite(telemetry.rssi) ? telemetry.rssi : null,
+    uptimeSeconds: Number.isFinite(telemetry.uptime_s) ? telemetry.uptime_s : null,
+    heapKb: Number.isFinite(telemetry.heap_kb) ? telemetry.heap_kb : null,
+    muted: typeof telemetry.is_muted === 'boolean' ? telemetry.is_muted : null,
   };
 }

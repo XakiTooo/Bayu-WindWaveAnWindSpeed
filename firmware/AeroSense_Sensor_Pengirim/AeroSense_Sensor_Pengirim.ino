@@ -119,6 +119,7 @@ Preferences prefs;
 esp_mqtt_client_handle_t mqttClient = nullptr;
 std::atomic<bool> mqttConnected{false};
 std::atomic<uint32_t> pendingNorthCalibrationNonce{0};
+std::atomic<uint32_t> pendingTelemetryNonce{0};
 
 enum SystemState {
   STATE_NORMAL_SAFE = 0,
@@ -340,12 +341,12 @@ void publishMuteCommand(bool muteVal) {
   Serial.printf("[MQTT CLOUD] Memancarkan status MUTE = %s ke Cloud Database\n", muteVal ? "ON" : "OFF");
 }
 
-void publishCalibrationAck(uint32_t nonce) {
+void publishCommandAck(const char *command, uint32_t nonce) {
   if (!mqttConnected || mqttClient == nullptr) return;
   char payload[96];
   snprintf(payload, sizeof(payload),
-           "{\"cmd\":\"calibrate_zero\",\"nonce\":%lu,\"status\":\"applied\"}",
-           (unsigned long)nonce);
+           "{\"cmd\":\"%s\",\"nonce\":%lu,\"status\":\"applied\"}",
+           command, (unsigned long)nonce);
   esp_mqtt_client_publish(mqttClient, TopicAck, payload, 0, 1, 0);
 }
 
@@ -370,6 +371,21 @@ void mqttEventCallback(void *, esp_event_base_t, int32_t eventId, void *eventDat
           pendingNorthCalibrationNonce = nonce;
           Serial.println(F("[MQTT CLOUD] Perintah kalibrasi utara diterima."));
         }
+        return;
+      }
+      if (!err && strcmp(doc["cmd"] | "", "request_telemetry") == 0) {
+        uint32_t nonce = doc["nonce"] | 0U;
+        if (nonce != 0) pendingTelemetryNonce = nonce;
+        return;
+      }
+      if (!err && (strcmp(doc["cmd"] | "", "buzzer_mute") == 0 ||
+                   strcmp(doc["cmd"] | "", "buzzer_unmute") == 0)) {
+        uint32_t nonce = doc["nonce"] | 0U;
+        bool mute = strcmp(doc["cmd"] | "", "buzzer_mute") == 0;
+        globalMuted = mute;
+        muteStartTime = mute ? millis() : 0;
+        if (mute) setBuzzerState(false);
+        if (nonce != 0) publishCommandAck(mute ? "buzzer_mute" : "buzzer_unmute", nonce);
         return;
       }
       if (!err && doc.containsKey("is_muted")) {
@@ -431,7 +447,8 @@ void publishTelemetryToDatabase() {
            "\"is_muted\":%s,"
            "\"packet_id\":%u,"
            "\"rssi\":%d,"
-           "\"uptime_s\":%lu"
+            "\"uptime_s\":%lu,"
+            "\"heap_kb\":%lu"
            "}",
            StationId,
            liveData.windKmh,
@@ -450,7 +467,8 @@ void publishTelemetryToDatabase() {
            globalMuted ? "true" : "false",
            ++packetIdCounter,
            WiFi.RSSI(),
-           millis() / 1000);
+            millis() / 1000,
+            (unsigned long)(ESP.getFreeHeap() / 1024));
 
   esp_mqtt_client_publish(mqttClient, TopicTelemetry, payload, 0, 1, 0);
 }
@@ -662,7 +680,12 @@ void loop() {
   uint32_t calibrationNonce = pendingNorthCalibrationNonce.exchange(0);
   if (calibrationNonce != 0) {
     calibrateNorth();
-    publishCalibrationAck(calibrationNonce);
+    publishCommandAck("calibrate_zero", calibrationNonce);
+  }
+  uint32_t telemetryNonce = pendingTelemetryNonce.exchange(0);
+  if (telemetryNonce != 0) {
+    publishTelemetryToDatabase();
+    publishCommandAck("request_telemetry", telemetryNonce);
   }
 
   // 3. Manajemen Wi-Fi & Auto-Connect MQTT dengan NTP
