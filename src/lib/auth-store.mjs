@@ -1,5 +1,6 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { getFirestore } from 'firebase-admin/firestore';
+import { getAuth } from 'firebase-admin/auth';
 import { getDashboardAdminApp } from './firebase-admin.js';
 import { cleanUsername, hashPassword, verifyPassword } from './auth-crypto.mjs';
 import * as local from './local-auth.mjs';
@@ -18,7 +19,7 @@ function database() {
   }
   return getFirestore(getDashboardAdminApp());
 }
-function publicUser(id, data) { return { username: id, name: data.name || id, role: data.role === 'admin' ? 'admin' : 'viewer' }; }
+function publicUser(id, data) { return { username: id, name: data.name || id, role: data.role === 'admin' ? 'admin' : 'viewer', provider: data.provider || 'password' }; }
 function sessionId(token) { return createHash('sha256').update(token).digest('hex'); }
 function readToken(request) {
   const value = request.headers.get('cookie')?.split(';').map((part) => part.trim())
@@ -56,6 +57,27 @@ export async function loginUser(username, password) {
   const token = randomBytes(32).toString('hex');
   await db.doc(`dashboardSessions/${sessionId(token)}`).create({ userId: id, expiresAt: new Date(Date.now() + sessionLifetimeMs) });
   return { token, user: publicUser(id, snapshot.data()) };
+}
+
+export async function loginGoogle(idToken) {
+  const decoded = await getAuth(getDashboardAdminApp()).verifyIdToken(idToken, true);
+  if (decoded.firebase?.sign_in_provider !== 'google.com' || !decoded.email_verified ||
+      Date.now() / 1000 - decoded.auth_time > 300) return null;
+  const id = 'g_' + createHash('sha256').update(decoded.uid).digest('hex').slice(0, 30);
+  const db = database();
+  const ref = db.doc(`dashboardUsers/${id}`);
+  const user = await db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(ref);
+    if (snapshot.exists && snapshot.data().enabled === false) return null;
+    const profile = { name: (decoded.name || decoded.email).slice(0, 80),
+      email: decoded.email, firebaseUid: decoded.uid, provider: 'google', lastLoginAt: Date.now() };
+    transaction.set(ref, snapshot.exists ? profile : { ...profile, role: 'viewer', enabled: true, createdAt: Date.now() }, { merge: true });
+    return publicUser(id, { ...snapshot.data(), ...profile });
+  });
+  if (!user) return null;
+  const token = randomBytes(32).toString('hex');
+  await db.doc(`dashboardSessions/${sessionId(token)}`).create({ userId: id, expiresAt: new Date(Date.now() + sessionLifetimeMs) });
+  return { token, user };
 }
 
 export async function currentUser(request) {

@@ -1,4 +1,5 @@
 #pragma once
+constexpr char StationId[] = "angin-01";
 constexpr char WifiSsid[] = "YOUR_2_4_GHZ_WIFI";
 constexpr char WifiPassword[] = "YOUR_WIFI_PASSWORD";
 constexpr char MqttUsername[] = "YOUR_MQTT_USERNAME";

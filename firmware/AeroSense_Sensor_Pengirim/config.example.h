@@ -1,4 +1,5 @@
 #pragma once
+constexpr char StationId[] = "angin-01";
 
 // Copy to config.h in this folder and fill in the ESP32 Wi-Fi and MQTT details.
 constexpr char WifiSsid[] = "YOUR_2_4_GHZ_WIFI";

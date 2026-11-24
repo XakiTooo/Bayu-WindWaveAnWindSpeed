@@ -43,11 +43,13 @@
 
 // ========================== 1. KONFIGURASI WI-FI & EMQX CLOUD ================
 // Ganti SSID & Password sesuai Wi-Fi tempat Node 2 berada (BISA BEDA DENGAN NODE 1!)
-constexpr char StationId[]     = "angin-01";
+
 
 // Topik MQTT Cloud Database
-constexpr char TopicTelemetry[] = "bayu/stations/angin-01/telemetry";
-constexpr char TopicCommand[]   = "bayu/stations/angin-01/cmd";
+const String TopicTelemetryValue = String("bayu/stations/") + StationId + "/telemetry";
+const char* TopicTelemetry = TopicTelemetryValue.c_str();
+const String TopicCommandValue = String("bayu/stations/") + StationId + "/cmd";
+const char* TopicCommand = TopicCommandValue.c_str();
 
 // Sertifikat Root CA DigiCert Global Root G2 (TLS Port 8883 EMQX Cloud)
 constexpr char BrokerCa[] = R"PEM(

@@ -6,7 +6,7 @@
     "dev": "next dev --hostname 127.0.0.1 --port 3000",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1 --port 3000",
-    "test": "node --test tests/simulation.test.mjs"
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "firebase": "^13.2.0",

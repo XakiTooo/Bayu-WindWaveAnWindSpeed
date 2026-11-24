@@ -11,3 +11,5 @@ out/
 *.log
 firmware/**/config.h
 .local-data/
+
+firmware/local/

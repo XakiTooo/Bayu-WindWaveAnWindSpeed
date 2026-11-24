@@ -589,3 +589,13 @@ body{font-size:16px;line-height:1.5}
 .managed-user button{flex:none;border:1px solid #cbd5e1;border-radius:6px;padding:8px;color:#334155;font-size:13px;min-height:38px}
 .managed-user button:disabled{opacity:.5;cursor:default}
 
+
+.provisioning-code { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; padding: 14px; background: #f1f5f9; border-radius: 8px; }
+.google-login { margin: 12px 0; }
+.status.wind-warning { color: #a66b15; }
+.provisioning-dialog { max-width: 560px; max-height: calc(100dvh - 32px); overflow-y: auto; }
+.provisioning-dialog > p { font-size: 14px; line-height: 1.6; margin-bottom: 12px; overflow-wrap: anywhere; }
+.provisioning-dialog .auth-header { gap: 16px; }
+.provisioning-dialog .auth-close { flex: none; min-width: 44px; min-height: 44px; }
+.provisioning-dialog .provisioning-code { margin: 14px 0; }
+.provisioning-done { width: 100%; margin-top: 14px; }

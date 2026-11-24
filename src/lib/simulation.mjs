@@ -4,9 +4,14 @@ const names = ['Utara', 'Timur Laut', 'Timur', 'Tenggara', 'Selatan', 'Barat Day
 export const format = (value) => value.toLocaleString('id-ID', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 export const direction = (angle) => names[Math.round(((angle % 360) + 360) % 360 / 45) % 8];
 export const timeLabel = (timestamp) => new Date(timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Jakarta' });
-export const state = (station, settings) => !station.online ? 'offline' : station.speed >= settings.threshold ? 'alarm' : Number.isFinite(station.battery) && station.battery <= settings.batteryThreshold ? 'warning' : 'normal';
-export const stateLabel = (station, settings) => ({ normal: 'Normal', warning: 'Baterai lemah', alarm: 'Alarm angin', offline: 'Data terputus' })[state(station, settings)];
-export const stateColor = (station, settings) => ({ normal: '#268fa0', warning: '#d89a3e', alarm: '#d56864', offline: '#96a2ad' })[state(station, settings)];
+export const state = (station, settings) => {
+  if (!station.online) return 'offline';
+  if (station.speed >= (station.settings?.dangerKmh ?? settings.threshold)) return 'alarm';
+  if (station.settings && station.speed >= station.settings.warningKmh) return 'wind-warning';
+  return Number.isFinite(station.battery) && station.battery <= (station.settings?.batteryThreshold ?? settings.batteryThreshold) ? 'warning' : 'normal';
+};
+export const stateLabel = (station, settings) => ({ normal: 'Normal', warning: 'Baterai lemah', 'wind-warning': 'Angin sedang', alarm: 'Alarm angin', offline: 'Data terputus' })[state(station, settings)];
+export const stateColor = (station, settings) => ({ normal: '#268fa0', warning: '#d89a3e', 'wind-warning': '#d89a3e', alarm: '#d56864', offline: '#96a2ad' })[state(station, settings)];
 
 export function createStations(timestamp = 0) {
   return [
@@ -170,5 +175,6 @@ export function updateStationFromTelemetry(station, telemetry) {
     uptimeSeconds: Number.isFinite(telemetry.uptime_s) ? telemetry.uptime_s : null,
     heapKb: Number.isFinite(telemetry.heap_kb) ? telemetry.heap_kb : null,
     muted: typeof telemetry.is_muted === 'boolean' ? telemetry.is_muted : null,
+    settings: telemetry.settings || station.settings,
   };
 }
