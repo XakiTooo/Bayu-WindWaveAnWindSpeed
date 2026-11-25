@@ -174,6 +174,8 @@ export function updateStationFromTelemetry(station, telemetry) {
     rssi: Number.isFinite(telemetry.rssi) ? telemetry.rssi : null,
     uptimeSeconds: Number.isFinite(telemetry.uptime_s) ? telemetry.uptime_s : null,
     heapKb: Number.isFinite(telemetry.heap_kb) ? telemetry.heap_kb : null,
+    directionBackendFresh: telemetry.directionProcessing === 'server' ? telemetry.directionBackendFresh === true : null,
+    rawWindDirectionDeg: telemetry.rawWindDirectionDeg ?? null,
     muted: typeof telemetry.is_muted === 'boolean' ? telemetry.is_muted : null,
     settings: telemetry.settings || station.settings,
   };

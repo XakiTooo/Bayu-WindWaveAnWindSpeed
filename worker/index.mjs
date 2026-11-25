@@ -1,10 +1,14 @@
+import { validReading } from '../src/lib/telemetry.mjs';
+import { applyWebConfiguration } from '../src/lib/station-registry.mjs';
 import { readFileSync } from 'node:fs';
 import { applicationDefault, deleteApp, initializeApp } from 'firebase-admin/app';
 import { getDatabase, ServerValue } from 'firebase-admin/database';
 import { getFirestore } from 'firebase-admin/firestore';
 import mqtt from 'mqtt';
 
-const telemetryTopic = 'bayu/stations/+/telemetry';
+const localMode = process.env.BAYU_LOCAL_WORKER === '1';
+const localStation = process.env.BAYU_LOCAL_STATION_ID;
+const telemetryTopic = localMode && /^[a-z0-9-]{1,64}$/.test(localStation || '') ? `bayu/stations/${localStation}/telemetry` : 'bayu/stations/+/telemetry';
 const topicPattern = /^bayu\/stations\/([a-z0-9-]{1,64})\/telemetry$/;
 const historyIntervalMs = 60_000;
 const alertCooldownMs = 10 * 60_000;
@@ -26,27 +30,8 @@ function parseTelemetry(topic, payload) {
     return null;
   }
 
-  if (!data || data.stationId !== stationId) return null;
-  const { windSpeedKmh, windDirectionDeg, gps, lat, lon, lng, rssi, uptime_s, heap_kb, packet_id, is_muted, battery } = data;
-  if (!Number.isFinite(windSpeedKmh) || windSpeedKmh < 0 ||
-      !Number.isFinite(windDirectionDeg) || windDirectionDeg < 0 ||
-      windDirectionDeg >= 360) return null;
-
-  return {
-    stationId,
-    windSpeedKmh,
-    windDirectionDeg,
-    ...(gps ? { gps } : {}),
-    ...(typeof lat === 'number' ? { lat } : {}),
-    ...(typeof lon === 'number' ? { lon } : {}),
-    ...(typeof lng === 'number' ? { lng } : {}),
-    ...(Number.isFinite(rssi) ? { rssi } : {}),
-    ...(Number.isFinite(uptime_s) ? { uptime_s } : {}),
-    ...(Number.isFinite(heap_kb) ? { heap_kb } : {}),
-    ...(Number.isFinite(packet_id) ? { packet_id } : {}),
-    ...(typeof is_muted === 'boolean' ? { is_muted } : {}),
-    ...(Number.isFinite(battery) && battery >= 0 && battery <= 100 ? { battery } : {}),
-  };
+  const reading = validReading(stationId, { ...data, receivedAt: Date.now() });
+  return reading ? { stationId, ...reading } : null;
 }
 
 function start() {
@@ -63,7 +48,7 @@ function start() {
   const historyMinutes = new Map();
   const lastAlerts = new Map();
   const alertThreshold = Number(process.env.BAYU_ALERT_THRESHOLD_KMH);
-  const telegramToken = process.env.BAYU_TELEGRAM_BOT_TOKEN;
+  const telegramToken = localMode ? '' : process.env.BAYU_TELEGRAM_BOT_TOKEN;
   const telegramChatId = process.env.BAYU_TELEGRAM_CHAT_ID;
   const client = mqtt.connect(mqttUrl.href, {
     username,
@@ -88,13 +73,22 @@ function start() {
   });
   client.on('message', async (topic, payload, packet) => {
     if (packet.retain) return;
-    const reading = parseTelemetry(topic, payload);
+    let reading = parseTelemetry(topic, payload);
     if (!reading) {
       console.warn('Pesan telemetri diabaikan karena formatnya tidak valid.');
       return;
     }
 
     const receivedAt = Date.now();
+    if (reading.directionProcessing === 'server') {
+      try {
+        const registry = (await firestore.doc(`stationRegistry/${reading.stationId}`).get()).data();
+        reading = applyWebConfiguration(reading, registry?.settings, registry?.directionCalibration);
+      } catch (error) {
+        console.error('Kalibrasi backend belum tersedia:', error.code ?? error.name);
+        return;
+      }
+    }
     if (telegramToken && telegramChatId && Number.isFinite(alertThreshold) && alertThreshold > 0 &&
         reading.windSpeedKmh >= alertThreshold && receivedAt - (lastAlerts.get(reading.stationId) || 0) >= alertCooldownMs) {
       lastAlerts.set(reading.stationId, receivedAt);
@@ -107,7 +101,7 @@ function start() {
         .catch((error) => console.error('Telegram alert gagal:', error.name));
     }
     const minute = Math.floor(receivedAt / historyIntervalMs);
-    const latestPath = `stations/${reading.stationId}/latest`;
+    const latestPath = `stations/${reading.stationId}/${localMode ? 'processedLatest' : 'latest'}`;
     const latestWrite = database.ref(latestPath)
       .set({ ...reading, receivedAt: ServerValue.TIMESTAMP })
       .then(() => console.log(`Tersimpan ke /${latestPath}`))
@@ -115,7 +109,7 @@ function start() {
 
     if (historyMinutes.get(reading.stationId) !== minute) {
       historyMinutes.set(reading.stationId, minute);
-      const historyRef = firestore.doc(`stations/${reading.stationId}/readings/${minute}`);
+      const historyRef = firestore.doc(`stations/${reading.stationId}/${localMode ? 'processedReadings' : 'readings'}/${minute}`);
       try {
         await historyRef.create({ ...reading, receivedAt: new Date(receivedAt) });
         console.log(`Riwayat tersimpan ke /${historyRef.path}`);
@@ -128,6 +122,10 @@ function start() {
       }
     }
     await latestWrite;
+    if (reading.directionProcessing === 'server') {
+      client.publish(`bayu/stations/${reading.stationId}/processed`, JSON.stringify({ windDirectionDeg: reading.windDirectionDeg, receivedAt }),
+        { qos: 1, retain: false }, (error) => { if (error) console.error('Koreksi arah gagal dikirim:', error.code ?? error.name); });
+    }
   });
 
   const stop = () => {

@@ -15,13 +15,13 @@ export async function GET(request) {
   try {
     if (!(await canReadStation(request, stationId))) return Response.json({ error: 'Akses tidak valid.' }, { status: 403, headers });
     const station = await getStation(stationId);
-    const snapshot = await getFirestore(getDashboardAdminApp()).collection(`stations/${stationId}/readings`)
+    const snapshot = await getFirestore(getDashboardAdminApp()).collection(`stations/${stationId}/${process.env.BAYU_LOCAL_WORKER === '1' ? 'processedReadings' : 'readings'}`)
       .orderBy('receivedAt', 'desc').limit(200).get();
     const rows = snapshot.docs.map((doc) => {
       const data = doc.data();
       const timestamp = data.receivedAt?.toMillis?.();
       return { timestamp, id: stationId.toUpperCase(), speed: data.windSpeedKmh,
-        angle: applyWebConfiguration(data, station?.settings).windDirectionDeg, battery: data.battery ?? null,
+        angle: applyWebConfiguration(data, station?.settings, station?.directionCalibration).windDirectionDeg, battery: data.battery ?? null,
         lat: data.gps?.fix ? data.gps.lat : data.lat,
         lng: data.gps?.fix ? data.gps.lon : data.lng ?? data.lon,
         source: 'mqtt', dataType: 'HARDWARE_REAL' };

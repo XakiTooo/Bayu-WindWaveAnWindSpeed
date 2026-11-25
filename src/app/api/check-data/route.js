@@ -12,11 +12,11 @@ export async function GET(request) {
   if (!stationId) return Response.json({ error: 'ID tidak valid.' }, { status: 400, headers });
   try {
     if (!(await canReadStation(request, stationId))) return Response.json({ error: 'Akses tidak valid.' }, { status: 403, headers });
-    const snapshot = await getDatabase(getDashboardAdminApp()).ref(`stations/${stationId}/latest`).get();
+    const snapshot = await getDatabase(getDashboardAdminApp()).ref(`stations/${stationId}/${process.env.BAYU_LOCAL_WORKER === '1' ? 'processedLatest' : 'latest'}`).get();
     const reading = validReading(stationId, snapshot.val());
     if (!reading) return Response.json({ stationId, status: 'waiting', latest: null }, { headers });
     const registry = await getStation(stationId);
-    const configured = applyWebConfiguration(reading, registry?.settings);
+    const configured = applyWebConfiguration(reading, registry?.settings, registry?.directionCalibration);
     const ageSeconds = Math.max(0, Math.floor((Date.now() - reading.receivedAt) / 1000));
     return Response.json({ stationId, ...configured, status: ageSeconds <= 30 ? 'recent' : 'stale',
       source: 'mqtt', ageSeconds, receivedAtIso: new Date(reading.receivedAt).toISOString() }, { headers });

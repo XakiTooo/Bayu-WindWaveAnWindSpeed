@@ -23,10 +23,10 @@ export async function POST(request) {
     }
 
     const text = message || (
-      `🚨 *PERINGATAN ANGIN KENCANG BAYU IoT*\n\n` +
-      `📍 *Stasiun:* \`${stationId || 'angin-01'}\`\n` +
-      `💨 *Kecepatan:* \`${speed} km/jam\` (Batas: ${threshold} km/jam)\n` +
-      `⏰ *Waktu:* ${new Date().toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta' })} WIB\n\n` +
+      `*PERINGATAN ANGIN KENCANG BAYU IoT*\n\n` +
+      `*Stasiun:* \`${stationId || 'angin-01'}\`\n` +
+      `*Kecepatan:* \`${speed} km/jam\` (Batas: ${threshold} km/jam)\n` +
+      `*Waktu:* ${new Date().toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta' })} WIB\n\n` +
       `_Status: Memerlukan perhatian tim lapangan._`
     );
 

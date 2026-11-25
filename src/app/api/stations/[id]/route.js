@@ -1,6 +1,6 @@
 import { currentUser } from '@/lib/auth-store.mjs';
 import { sameOrigin } from '@/lib/admin-session.mjs';
-import { normalizeStationId, getStation, canManageStation, saveStationSettings } from '@/lib/station-registry.mjs';
+import { normalizeStationId, getStation, canManageStation, saveStationSettings, saveStationLocation } from '@/lib/station-registry.mjs';
 
 export const runtime = 'nodejs';
 export async function PATCH(request, context) {
@@ -11,7 +11,13 @@ export async function PATCH(request, context) {
     const id = normalizeStationId((await context.params).id);
     if (!id) return Response.json({ error: 'ID tidak valid.' }, { status: 400, headers });
     if (!canManageStation(user, await getStation(id))) return Response.json({ error: 'Akses stasiun ditolak.' }, { status: 403, headers });
-    const settings = await saveStationSettings(id, user, await request.json());
+    const input = await request.json();
+    if(input.operation === 'location'){
+      const location = await saveStationLocation(id,user,input);
+      if(!location)return Response.json({error:'Akses stasiun ditolak.'},{status:403,headers});
+      return Response.json({location},{headers});
+    }
+    const settings = await saveStationSettings(id, user, input);
     if (!settings) return Response.json({ error: 'Akses stasiun ditolak.' }, { status: 403, headers });
     return Response.json({ settings, scope: 'web' }, { headers });
   } catch (error) {
