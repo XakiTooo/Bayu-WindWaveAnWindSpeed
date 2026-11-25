@@ -1,3 +1,5 @@
+import { getStation, applyWebConfiguration } from '@/lib/station-registry.mjs';
+import { publishProcessedDirection } from '@/lib/publish-direction.mjs';
 import { timingSafeEqual } from 'node:crypto';
 import { getDatabase } from 'firebase-admin/database';
 import { getFirestore } from 'firebase-admin/firestore';
@@ -41,7 +43,8 @@ export async function POST(request) {
     const latest = getDatabase(app).ref(`stations/${stationId}/latest`);
     const minute = Math.floor(receivedAt / 60_000);
     const history = getFirestore(app).doc(`stations/${stationId}/readings/${minute}`);
-    const data = { stationId, ...reading };
+    const station = await getStation(stationId);
+    const data = { stationId, ...(reading.directionProcessing === 'server' ? applyWebConfiguration(reading, station?.settings, station?.directionCalibration) : reading) };
     const [realtime, historical] = await Promise.allSettled([
       latest.transaction((current) => current?.receivedAt >= receivedAt ? undefined : data),
       history.create({ ...data, receivedAt: new Date(receivedAt) }).catch((error) => {
@@ -50,6 +53,7 @@ export async function POST(request) {
     ]);
     if (realtime.status === 'rejected') throw realtime.reason;
     if (historical.status === 'rejected') throw historical.reason;
+    if (reading.directionProcessing === 'server') await publishProcessedDirection(stationId, data);
     return Response.json({ ok: true, stationId });
   } catch (error) {
     console.error('BAYU ingest failed:', error.code ?? error.name);

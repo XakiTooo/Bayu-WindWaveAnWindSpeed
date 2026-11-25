@@ -90,3 +90,46 @@ Ketikkan karakter berikut di Serial Monitor untuk pengujian cepat:
 - `'m'` : Mute / Unmute manual via serial.
 - `'1'` / `'2'` / `'3'` : Tes manual LED Merah / Hijau / Biru.
 - `'4'` : Tes manual Buzzer 1 detik.
+
+## Perbaikan mute web dan tombol penerima
+
+Gunakan pasangan terbaru `BAYU_Pengirim_Web/BAYU_Pengirim_Web.ino` dan `BAYU_Penerima_Web/BAYU_Penerima_Web.ino`. Isi Wi-Fi, kredensial MQTT dan StationId yang sama untuk kedua ESP. Kode lama di folder bernomor/AeroSense tidak mendapat perbaikan ini.
+
+- Tombol penerima mematikan buzzer lokal dan mengirim permintaan mute melalui `/cmd`. Permintaan dicoba ulang setiap dua detik sampai telemetri pengirim mengonfirmasi, maksimal lima menit.
+- Perintah web `buzzer_mute` dan `buzzer_unmute` ditangani oleh kedua ESP. Backend menunggu ACK dengan nonce yang sama dari `sender` dan `receiver` sebelum menyatakan berhasil. Pesan gagal dapat berarti hanya satu ESP yang sudah menerapkan perintah.
+- Telemetri pengirim menyinkronkan mute dan unmute ke penerima. Dashboard mengikuti `is_muted` sehingga perubahan dari tombol fisik dan berakhirnya snooze ikut terlihat.
+- Mute adalah snooze lima menit. Alarm suara dapat aktif kembali setelah timeout, dan kondisi aman mereset mute. LED tetap menunjukkan kondisi angin.
+- Kedua ESP harus online di broker. Akun MQTT penerima perlu izin publish `/cmd` dan `/ack`, subscribe `/cmd` dan `/telemetry`. Akun pengirim perlu subscribe `/cmd` dan `/config`, publish `/ack` dan `/telemetry`.
+
+Uji perangkat setelah mengunggah kedua sketch: buat kondisi alarm, tekan tombol penerima, pastikan kedua buzzer senyap dan `is_muted:true` diterima web. Ulangi melalui web, lalu unmute dan tunggu snooze berakhir. Matikan koneksi salah satu ESP untuk memastikan web menampilkan konfirmasi belum lengkap.
+
+## Kalibrasi empat arah AS5600
+
+Web → Kontrol → Kalibrasi empat arah. Mulai, arahkan sayap ke Utara dan rekam; ulangi Timur, Selatan, Barat. ESP merekam 30 sampel stabil (~3 detik), menolak sensor/magnet yang tidak terbaca, serta berhenti setelah 8 detik bila sudut terus bergerak. Selisih sampel dari titik acuan harus dalam 2 derajat.
+
+Simpan kalibrasi memvalidasi empat titik dengan jarak tiap sektor 30–150 derajat mentah dan total satu putaran. Putaran sensor normal maupun terbalik didukung. Koreksi menggunakan interpolasi tiap sektor, termasuk melewati nol derajat. Draft kedaluwarsa setelah 15 menit. Memulai ulang mengganti draft sesi sebelumnya.
+
+Titik disimpan sebagai satu record NVS `cardinal4` dan dimuat saat boot. Kalibrasi aktif sebelumnya tetap digunakan sampai penyimpanan berhasil. Perintah MQTT `/cmd` memakai `calibrate_four`, operation `start/capture/save/cancel`, session numerik, point 0–3 untuk capture, serta nonce. ACK pengirim berisi hasil atau alasan penolakan. Hanya pengirim perlu firmware baru; penerima tetap menampilkan sudut terkoreksi dari telemetri.
+
+Perubahan mekanik atau magnet memerlukan kalibrasi ulang. Jika posisi fisik yang sama menghasilkan pembacaan berbeda, benahi magnet dan dudukannya terlebih dahulu. Koreksi arah virtual di dashboard adalah pengaturan tambahan yang terpisah dari kalibrasi sensor.
+
+
+Kalibrasi tetap empat arah. Nilai mentah titik Barat tidak harus 270 derajat. Setiap sektor memakai rentang hasil rekamnya sendiri. Misalnya S mentah 180, B mentah 240, U mentah 10: sektor S–B menggunakan rentang 60 derajat mentah untuk 90 derajat keluaran; B–U menggunakan rentang 130 derajat mentah melewati nol untuk 90 derajat keluaran. Jarak tiap sektor mentah yang diterima 8–172 derajat, urutan harus konsisten membentuk satu putaran.
+
+
+## Implementasi aktif: kalibrasi empat arah di backend
+
+Versi terbaru menggantikan penyimpanan kalibrasi di NVS. Empat titik raw disimpan dalam `stationRegistry/{id}.directionCalibration` di Firestore. Draft berada dalam dokumen stasiun dan hanya pemilik/admin yang dapat mengubahnya melalui endpoint berautentikasi. Web tetap memakai langkah U → T → S → B.
+
+Pengirim mengirim `rawWindDirectionDeg`, `directionProcessing: server`, validitas AS5600 serta hasil jendela stabil 30 sampel. Backend menunggu jendela baru setelah tombol Rekam ditekan, memvalidasi empat titik, dan menghitung interpolasi per sektor. Contoh U=10, T=100, S=180, B=240: raw 240 dikoreksi menjadi 270; raw 305 menjadi 315. Rumus berada di `src/lib/direction-calibration.mjs`.
+
+Webhook `/api/telemetry/ingest` menyimpan raw dan hasil koreksi, kemudian mengirim sudut final ke `bayu/stations/{id}/processed` menggunakan MQTT TLS. Pengirim subscribe ke topik ini, dan meneruskan hasil terakhir dalam kolom `direction_deg`/`cardinal` pada telemetri berikutnya. Penerima tetap memakai firmware yang sudah ada. Raw selalu terpisah agar tidak dikoreksi dua kali. Koreksi arah virtual web ikut diterapkan pada hasil akhir.
+
+Deploy backend/web versi ini sebelum menguji kalibrasi dengan firmware baru. Tidak ada environment baru; backend membutuhkan MQTT_URL, MQTT_USERNAME, MQTT_PASSWORD dan CA serta kredensial Firebase yang sudah digunakan. ACL akun backend perlu publish `/processed`, akun pengirim perlu subscribe `/processed`.
+
+Jika backend tidak membalas, pengirim tetap mengirim raw. LCD menahan hasil koreksi terakhir, atau menampilkan raw jika belum pernah menerima hasil backend. Kolom `directionBackendFresh` melaporkan apakah hasil backend diterima dalam lima detik terakhir. Pemrosesan arah membutuhkan backend yang aktif; halaman browser boleh ditutup. Pengujian end-to-end dengan sensor tetap diperlukan setelah deployment dan upload firmware.
+
+
+## Uji backend lokal
+
+Jalankan `npm run worker:local` dari root repo. `.env.local` memakai `BAYU_LOCAL_WORKER=1` dan `BAYU_LOCAL_STATION_ID` untuk stasiun uji. Dashboard lokal membaca `processedLatest` dan `processedReadings`, sehingga tidak tertimpa data webhook Vercel versi lama. Worker menggunakan konfigurasi MQTT/Firebase yang sudah ada dan mengirim sudut final melalui `/processed`. Notifikasi Telegram tidak dikirim dalam mode lokal. Laptop dan worker harus tetap berjalan selama pengujian. Untuk kembali memakai jalur webhook pada suatu environment, gunakan `BAYU_LOCAL_WORKER=0` dan restart server environment tersebut.

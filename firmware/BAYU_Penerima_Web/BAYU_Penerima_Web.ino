@@ -252,7 +252,16 @@ void updateLcd() {
 }
 
 // ========================== 7. MQTT EVENT & SUBSCRIPTION =====================
+bool pendingMuteSync = false;
+bool requestedMute = false;
+uint32_t lastMutePublish = 0;
+uint32_t muteRequestStarted = 0;
+
 void publishMuteCommand(bool muteVal) {
+  if (!pendingMuteSync || requestedMute != muteVal) muteRequestStarted = millis();
+  pendingMuteSync = true;
+  requestedMute = muteVal;
+  lastMutePublish = millis();
   if (!mqttConnected || mqttClient == nullptr) return;
   char payload[64];
   snprintf(payload, sizeof(payload), "{\"cmd\":\"mute\",\"is_muted\":%s}", muteVal ? "true" : "false");
@@ -274,6 +283,8 @@ void mqttEventCallback(void *, esp_event_base_t, int32_t eventId, void *eventDat
     mqttConnected = false;
     Serial.println(F("[EMQX CLOUD] Terputus. Menjadwalkan coba ulang..."));
   } else if (eventId == MQTT_EVENT_DATA) {
+    // Tolak fragmen agar perintah tidak dibaca sebagian.
+    if (event->current_data_offset != 0 || event->data_len != event->total_data_len) return;
     // Tangani data masuk
     if (event->data_len > 0) {
       char topicBuffer[128];
@@ -331,16 +342,16 @@ void mqttEventCallback(void *, esp_event_base_t, int32_t eventId, void *eventDat
           telemetry.packetId = doc["packet_id"];
         }
 
-        // Sinkronisasi status mute jika dikirim dalam telemetri
-        if (doc.containsKey("is_muted")) {
-          bool cloudMute = doc["is_muted"];
-          if (cloudMute && !telemetry.isMuted) {
-            telemetry.isMuted = true;
-            muteStartTime = millis();
-            setBuzzerState(false);
-          } else if (!cloudMute && telemetry.statusCode == 0) {
-            telemetry.isMuted = false;
-            muteStartTime = 0;
+        // Pengirim menjadi sumber status bersama. Jangan timpa permintaan tombol
+        // dengan telemetri lama sebelum pengirim mengonfirmasi nilai yang diminta.
+        if (doc["is_muted"].is<bool>()) {
+          bool cloudMute = doc["is_muted"].as<bool>();
+          if (pendingMuteSync && cloudMute == requestedMute) pendingMuteSync = false;
+          if (!pendingMuteSync) {
+            if (cloudMute && !telemetry.isMuted) muteStartTime = millis();
+            telemetry.isMuted = cloudMute;
+            if (!cloudMute) muteStartTime = 0;
+            if (cloudMute) setBuzzerState(false);
           }
         }
 
@@ -352,15 +363,29 @@ void mqttEventCallback(void *, esp_event_base_t, int32_t eventId, void *eventDat
       }
       // 2. Jika pesan dari topik command (Mute Remote):
       else if (strcmp(topicBuffer, TopicCommand) == 0) {
-        if (doc.containsKey("is_muted")) {
-          bool remoteMute = doc["is_muted"];
+        const char *command = doc["cmd"] | "";
+        bool webMute = strcmp(command, "buzzer_mute") == 0;
+        bool webUnmute = strcmp(command, "buzzer_unmute") == 0;
+        if (webMute || webUnmute || (strcmp(command, "mute") == 0 && doc["is_muted"].is<bool>())) {
+          bool remoteMute = webMute || (!webUnmute && doc["is_muted"].as<bool>());
+          if (webMute || webUnmute) pendingMuteSync = false;
+          bool previouslyMuted = telemetry.isMuted;
           telemetry.isMuted = remoteMute;
           if (remoteMute) {
-            muteStartTime = millis();
+            if (!previouslyMuted || webMute) muteStartTime = millis();
             setBuzzerState(false);
             Serial.println(F("[SYNC MUTE DARI CLOUD] Mute diaktifkan selama 5 menit!"));
           } else {
             muteStartTime = 0;
+          }
+          uint32_t nonce = doc["nonce"] | 0U;
+          if ((webMute || webUnmute) && nonce != 0) {
+            JsonDocument ack;
+            ack["cmd"] = command; ack["nonce"] = nonce;
+            ack["status"] = "applied"; ack["device"] = "receiver";
+            String payload; serializeJson(ack, payload);
+            String topic = String("bayu/stations/") + StationId + "/ack";
+            esp_mqtt_client_publish(mqttClient, topic.c_str(), payload.c_str(), 0, 1, 0);
           }
         }
       }
@@ -377,7 +402,8 @@ void startMqtt() {
   config.broker.verification.certificate = BrokerCa;
   config.credentials.username = MqttUsername;
   config.credentials.authentication.password = MqttPassword;
-  config.credentials.client_id = "aerosense-node2-indoor-display";
+  static String clientId = String("bayu-rx-") + StationId + "-" + WiFi.macAddress();
+  config.credentials.client_id = clientId.c_str();
   config.outbox.limit = 2048;
 
   mqttClient = esp_mqtt_client_init(&config);
@@ -465,6 +491,11 @@ void setup() {
 
 // ========================== 9. LOOP UTAMA ====================================
 void loop() {
+  // QoS 1 saja tidak cukup saat tombol ditekan sebelum MQTT tersambung.
+  if (pendingMuteSync && millis() - lastMutePublish >= 2000) {
+    if (millis() - muteRequestStarted < MUTE_SNOOZE_MS) publishMuteCommand(requestedMute);
+    else pendingMuteSync = false;
+  }
   static uint32_t lastLcdUpdate = 0;
   static uint32_t lastMqttAttempt = 0;
   static bool wifiWasConnected = false;

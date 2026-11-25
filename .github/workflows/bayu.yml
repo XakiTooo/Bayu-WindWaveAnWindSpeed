@@ -3,7 +3,7 @@ name: BAYU CI/CD
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "feature/**", "fix/**"]
   workflow_dispatch:
 
 permissions:
@@ -51,3 +51,42 @@ jobs:
           vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
           vercel build --prod --token="$VERCEL_TOKEN"
           vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+
+  preview:
+    if: startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/fix/')
+    needs: verify
+    runs-on: ubuntu-latest
+    concurrency:
+      group: bayu-vercel-preview-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      VERCEL_ORG_ID: team_d9OvzH8atvfJ4B34Q8rsDHH9
+      VERCEL_PROJECT_ID: prj_Wln1jDxgE2MuDJzrpE0QSLXFuvow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Check preview credentials
+        id: credentials
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          if [ -n "$VERCEL_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Preview deploy skipped. Configure the existing Vercel project Git integration or add VERCEL_TOKEN to Actions secrets."
+          fi
+      - run: npm ci
+        if: steps.credentials.outputs.available == 'true'
+      - name: Deploy branch preview
+        if: steps.credentials.outputs.available == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          npm install --global vercel@latest
+          vercel pull --yes --environment=preview --token="$VERCEL_TOKEN"
+          vercel build --token="$VERCEL_TOKEN"
+          vercel deploy --prebuilt --token="$VERCEL_TOKEN"

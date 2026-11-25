@@ -1,4 +1,4 @@
-// BAYU: konfigurasi alarm dari backend melalui MQTT /config.
+// BAYU: arah dikoreksi backend; sensor raw dikirim via /telemetry, hasil diterima via /processed.
 // Nilai terakhir disimpan di NVS agar alarm lokal tetap berjalan saat offline.
 /*
  * BAYU_Pengirim_Web
@@ -110,7 +110,6 @@ Preferences prefs;
 
 esp_mqtt_client_handle_t mqttClient = nullptr;
 std::atomic<bool> mqttConnected{false};
-std::atomic<uint32_t> pendingNorthCalibrationNonce{0};
 std::atomic<uint32_t> pendingTelemetryNonce{0};
 struct AlarmConfig {
   float warningKmh;
@@ -122,6 +121,17 @@ portMUX_TYPE configMux = portMUX_INITIALIZER_UNLOCKED;
 AlarmConfig pendingAlarmConfig{};
 bool hasPendingAlarmConfig = false;
 uint64_t appliedConfigRevision = 0;
+
+// Koreksi dilakukan backend; ESP hanya mengukur raw dan menerima hasil /processed.
+float backendDirection = 0;
+uint64_t backendDirectionRevision = 0;
+uint32_t backendDirectionReceived = 0;
+bool hasBackendDirection = false;
+float stableRawDirection = 0;
+uint64_t stableRawCapturedAt = 0;
+uint16_t stableRawSamples = 0;
+const String TopicProcessedValue = String("bayu/stations/") + StationId + "/processed";
+const char *TopicProcessed = TopicProcessedValue.c_str();
 
 
 enum SystemState {
@@ -137,7 +147,6 @@ bool globalMuted          = false;
 uint32_t muteStartTime    = 0;
 bool as5600I2CDetected    = false;
 bool as5600MagnetDetected = false;
-float northOffsetDeg      = 0.0f;
 char lastArahSource[32]   = "Belum Dibaca";
 float lastRawAngleDeg     = 0.0f;
 
@@ -203,6 +212,7 @@ const char* statusToStr(uint8_t code) {
 
 // Fungsi pembacaan sudut raw (0.0 - 359.9°) dari I2C AS5600 atau Analog Pin 34
 float getRawAngleDegrees() {
+  as5600I2CDetected = false; as5600MagnetDetected = false;
   // 1. Coba baca I2C AS5600 (Register 0x0B Status & 0x0C RAW ANGLE dengan Repeated Start)
   Wire.beginTransmission(AS5600_ADDR);
   Wire.write(0x0B); // Register STATUS
@@ -250,12 +260,33 @@ float getRawAngleDegrees() {
 
 // Pembacaan Sensor Arah setelah dikurangi Offset Kalibrasi Utara
 float readWindDirectionDegrees() {
-  float rawDeg = getRawAngleDegrees();
+  float raw = getRawAngleDegrees();
+  portENTER_CRITICAL(&configMux);
+  float angle = hasBackendDirection ? backendDirection : raw;
+  portEXIT_CRITICAL(&configMux);
+  return angle;
+}
 
-  float calDeg = rawDeg - northOffsetDeg;
-  while (calDeg < 0.0f)   calDeg += 360.0f;
-  while (calDeg >= 360.0f) calDeg -= 360.0f;
-  return calDeg;
+void sampleStableRawDirection() {
+  static uint32_t previous = 0;
+  static uint16_t count = 0;
+  static float anchor = 0, sumSin = 0, sumCos = 0;
+  if (millis() - previous < 100) return;
+  previous = millis();
+  float raw = getRawAngleDegrees();
+  if (!as5600I2CDetected || !as5600MagnetDetected || !isfinite(raw)) {
+    count = 0; stableRawSamples = 0; return;
+  }
+  // Hanya pemeriksaan kestabilan; pemetaan empat arah sepenuhnya di backend.
+  float distance = fabsf(fmodf(raw - anchor + 540.0f, 360.0f) - 180.0f);
+  if (count == 0 || distance > 2.0f) { anchor = raw; count = 0; sumSin = 0; sumCos = 0; }
+  sumSin += sinf(raw * DEG_TO_RAD); sumCos += cosf(raw * DEG_TO_RAD); ++count;
+  if (count >= 30) {
+    float mean = atan2f(sumSin, sumCos) * RAD_TO_DEG;
+    stableRawDirection = mean < 0 ? mean + 360.0f : mean;
+    stableRawCapturedAt = (uint64_t)time(nullptr) * 1000ULL;
+    stableRawSamples = count; count = 0;
+  }
 }
 
 // ========================== 7. DRIVER ACTUATOR (LED & BUZZER) ================
@@ -348,7 +379,7 @@ void publishCommandAck(const char *command, uint32_t nonce) {
   if (!mqttConnected || mqttClient == nullptr) return;
   char payload[96];
   snprintf(payload, sizeof(payload),
-           "{\"cmd\":\"%s\",\"nonce\":%lu,\"status\":\"applied\"}",
+           "{\"cmd\":\"%s\",\"nonce\":%lu,\"status\":\"applied\",\"device\":\"sender\"}",
            command, (unsigned long)nonce);
   esp_mqtt_client_publish(mqttClient, TopicAck, payload, 0, 1, 0);
 }
@@ -361,6 +392,7 @@ void mqttEventCallback(void *, esp_event_base_t, int32_t eventId, void *eventDat
     // Berlangganan topik perintah kontrol (Mute)
     esp_mqtt_client_subscribe(mqttClient, TopicCommand, 1);
     esp_mqtt_client_subscribe(mqttClient, TopicConfig, 1);
+    esp_mqtt_client_subscribe(mqttClient, TopicProcessed, 1);
   } else if (eventId == MQTT_EVENT_DISCONNECTED || eventId == MQTT_EVENT_ERROR) {
     mqttConnected = false;
     Serial.println(F("[EMQX CLOUD] Node 1 Terputus. Menjadwalkan coba ulang..."));
@@ -368,6 +400,21 @@ void mqttEventCallback(void *, esp_event_base_t, int32_t eventId, void *eventDat
     // Menerima perintah remote via MQTT (misal tombol mute ditekan di Node 2)
     // Commands/configurations fit in one MQTT event; reject fragmented or oversized data.
     if (event->current_data_offset != 0 || event->data_len != event->total_data_len) return;
+    if (event->topic_len == strlen(TopicProcessed) && memcmp(event->topic, TopicProcessed, event->topic_len) == 0) {
+      JsonDocument processed;
+      if (deserializeJson(processed, event->data, event->data_len)) return;
+      float angle = processed["windDirectionDeg"] | -1.0f;
+      uint64_t revision = processed["receivedAt"] | (uint64_t)0;
+      uint64_t nowMs = (uint64_t)time(nullptr) * 1000ULL;
+      if (!isfinite(angle) || angle < 0 || angle >= 360 || !revision || revision > nowMs + 2000 || nowMs > revision + 15000) return;
+      portENTER_CRITICAL(&configMux);
+      if (revision > backendDirectionRevision) {
+        backendDirection = angle; backendDirectionRevision = revision;
+        backendDirectionReceived = millis(); hasBackendDirection = true;
+      }
+      portEXIT_CRITICAL(&configMux);
+      return;
+    }
     const bool configTopic = event->topic_len == strlen(TopicConfig) &&
       memcmp(event->topic, TopicConfig, event->topic_len) == 0;
     const bool commandTopic = event->topic_len == strlen(TopicCommand) &&
@@ -396,14 +443,6 @@ void mqttEventCallback(void *, esp_event_base_t, int32_t eventId, void *eventDat
     if (event->data_len > 0) {
       JsonDocument doc;
       DeserializationError err = deserializeJson(doc, event->data, event->data_len);
-      if (!err && strcmp(doc["cmd"] | "", "calibrate_zero") == 0) {
-        uint32_t nonce = doc["nonce"] | 0U;
-        if (nonce != 0) {
-          pendingNorthCalibrationNonce = nonce;
-          Serial.println(F("[MQTT CLOUD] Perintah kalibrasi utara diterima."));
-        }
-        return;
-      }
       if (!err && strcmp(doc["cmd"] | "", "request_telemetry") == 0) {
         uint32_t nonce = doc["nonce"] | 0U;
         if (nonce != 0) pendingTelemetryNonce = nonce;
@@ -461,12 +500,17 @@ void startMqtt() {
 void publishTelemetryToDatabase() {
   if (!mqttConnected || mqttClient == nullptr) return;
 
-  char payload[512];
+  char payload[1536];
   snprintf(payload, sizeof(payload),
            "{"
            "\"stationId\":\"%s\","
            "\"windSpeedKmh\":%.2f,"
            "\"windDirectionDeg\":%.2f,"
+           "\"rawWindDirectionDeg\":%.2f,"
+           "\"directionProcessing\":\"server\","
+           "\"directionSensorValid\":%s,"
+           "\"directionBackendFresh\":%s,"
+           "\"directionSample\":{\"rawDeg\":%.2f,\"samples\":%u,\"capturedAt\":%llu},"
            "\"station_id\":\"%s\","
            "\"speed_kmh\":%.2f,"
            "\"speed_mps\":%.2f,"
@@ -484,6 +528,10 @@ void publishTelemetryToDatabase() {
            StationId,
            liveData.windKmh,
            liveData.windDeg,
+           lastRawAngleDeg,
+           (as5600I2CDetected && as5600MagnetDetected) ? "true" : "false",
+           (hasBackendDirection && millis() - backendDirectionReceived < 5000) ? "true" : "false",
+           stableRawDirection, stableRawSamples, (unsigned long long)stableRawCapturedAt,
            StationId,
            liveData.windKmh,
            liveData.windMps,
@@ -535,19 +583,8 @@ void applyPendingWebConfig() {
 
 // ========================== 9. INPUT TOMBOL & KALIBRASI SERIAL ===============
 bool calibrateNorth() {
-  as5600I2CDetected = false;
-  as5600MagnetDetected = false;
-  const float measured = getRawAngleDegrees();
-  if (!as5600I2CDetected || !as5600MagnetDetected || !isfinite(measured)) {
-    Serial.println(F("[KALIBRASI DITOLAK] Periksa AS5600 I2C dan magnet."));
-    return false;
-  }
-  if (prefs.putFloat("north", measured) == 0) return false;
-  northOffsetDeg = measured;
-
-  Serial.println(F("\n>>> [KALIBRASI UTARA SUKSES] Titik ini dikunci sebagai UTARA (0.0 deg)! <<<"));
-  Serial.printf(">>> Sumber Sensor: %s | Nilai Offset Disimpan: %.1f derajat <<<\n\n", lastArahSource, northOffsetDeg);
-  return true;
+  Serial.println(F("[KALIBRASI] Gunakan panduan empat arah di web. Titik dan koreksi disimpan di Firebase."));
+  return false;
 }
 
 void handleSerialCommands() {
@@ -587,7 +624,7 @@ void handleSerialCommands() {
       float vAdc = ((float)adc / 4095.0f) * 3.3f;
       Serial.printf(" 4. Pin Analog 34 (ADC Fallback) : %d counts (%.2f Volt -> %.1f derajat)\n",
                     adc, vAdc, ((float)adc / 4095.0f) * 360.0f);
-      Serial.printf(" 5. Offset Kalibrasi Utara       : %.1f derajat (Ketik 'r' untuk reset ke 0)\n", northOffsetDeg);
+      Serial.println(F(" 5. Koreksi empat arah dikelola backend dan Firebase."));
       Serial.printf(" 6. HASIL AKHIR ARAH ANGIN       : %.1f derajat (Mata Angin: %s)\n",
                     readWindDirectionDegrees(), getWindCardinal(readWindDirectionDegrees()));
       Serial.println(F("=======================================================\n"));
@@ -623,9 +660,7 @@ void handleSerialCommands() {
       publishMuteCommand(globalMuted);
       Serial.printf("\n>>> [MUTE TOGGLE] Status Buzzer: %s <<<\n\n", globalMuted ? "SENYAP (5 MENIT)" : "AKTIF (UNMUTED)");
     } else if (c == 'r' || c == 'R') {
-      northOffsetDeg = 0.0f;
-      prefs.putFloat("north", 0.0f);
-      Serial.println(F("\n>>> [RESET KALIBRASI] Offset Utara dikembalikan ke 0.0 derajat <<<\n"));
+      Serial.println(F("[KALIBRASI] Ulangi atau ubah kalibrasi melalui web. ESP tidak mengubah titik Firebase."));
     }
   }
 }
@@ -681,7 +716,6 @@ void setup() {
 
   // Baca kalibrasi offset Utara dari memori Flash
   prefs.begin("aerosense", false);
-  northOffsetDeg = prefs.getFloat("north", 0.0f);
   JsonDocument storedWebConfig;
   const String storedAlarm = prefs.getString("webAlarm", "");
   if (!deserializeJson(storedWebConfig, storedAlarm)) {
@@ -694,7 +728,7 @@ void setup() {
     }
   }
 
-  Serial.printf("[MEMORI] Offset Arah Utara: %.1f derajat\n", northOffsetDeg);
+  Serial.println(F("[ARAH] Mode backend. Menunggu sudut terkoreksi melalui MQTT /processed."));
 
   // Inisialisasi I2C Sensor AS5600
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -759,10 +793,7 @@ void loop() {
   handleButtonInput();
   handleSerialCommands();
   applyPendingWebConfig();
-  uint32_t calibrationNonce = pendingNorthCalibrationNonce.exchange(0);
-  if (calibrationNonce != 0) {
-    if (calibrateNorth()) publishCommandAck("calibrate_zero", calibrationNonce);
-  }
+  sampleStableRawDirection();
   uint32_t telemetryNonce = pendingTelemetryNonce.exchange(0);
   if (telemetryNonce != 0) {
     publishTelemetryToDatabase();

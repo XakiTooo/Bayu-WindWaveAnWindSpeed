@@ -1,3 +1,4 @@
+import { calibratedDirection } from './direction-calibration.mjs';
 import { randomBytes } from 'node:crypto';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getDashboardAdminApp } from './firebase-admin.js';
@@ -68,9 +69,23 @@ export function stationTopics(id) {
   return { telemetry: `${base}/telemetry`, command: `${base}/cmd`, configuration: `${base}/config`, acknowledgement: `${base}/ack` };
 }
 
-export function applyWebConfiguration(reading, settings = defaultStationSettings) {
-  const rawDirection = reading.windDirectionDeg;
-  const angle = ((rawDirection + settings.directionOffsetDeg) % 360 + 360) % 360;
+export function applyWebConfiguration(reading, settings = defaultStationSettings, calibration) {
+  const rawDirection = reading.rawWindDirectionDeg ?? reading.windDirectionDeg;
+  const corrected = calibratedDirection(reading, calibration);
+  const angle = ((corrected + settings.directionOffsetDeg) % 360 + 360) % 360;
   const status = reading.windSpeedKmh >= settings.dangerKmh ? 'BAHAYA' : reading.windSpeedKmh >= settings.warningKmh ? 'WASPADA' : 'AMAN';
   return { ...reading, rawWindDirectionDeg: rawDirection, windDirectionDeg: angle, webStatus: status, settings };
+}
+
+export function validateStationLocation(value) {
+  if(!value || !Number.isFinite(value.lat) || Math.abs(value.lat)>90 || !Number.isFinite(value.lng) || Math.abs(value.lng)>180) throw new Error('Koordinat tidak valid.');
+  return {lat:value.lat,lng:value.lng};
+}
+export async function saveStationLocation(id, user, value) {
+  const {lat,lng}=validateStationLocation(value);
+  return getFirestore(getDashboardAdminApp()).runTransaction(async transaction=>{
+    const ref=collection().doc(id), snapshot=await transaction.get(ref);
+    if(!snapshot.exists || !canManageStation(user,snapshot.data()))return null;
+    transaction.update(ref,{lat,lng,updatedAt:Date.now()});return {lat,lng};
+  });
 }

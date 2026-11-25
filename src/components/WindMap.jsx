@@ -16,7 +16,7 @@ function icon(station, index, selected, settings) {
 function centerOnStation(map, station, zoom = map.getZoom()) {
   if (!map || !station) return;
   const mobile = map.getSize().x <= 760;
-  const offset = mobile ? L.point(0, map.getSize().y * .25) : L.point(-185, 0);
+  const offset = mobile ? L.point(0, map.getSize().y * .25) : L.point(-220, 0);
   const center = map.unproject(map.project([station.lat, station.lng], zoom).add(offset), zoom);
   map.setView(center, zoom, { animate: true });
 }

@@ -16,6 +16,14 @@ export function validReading(id, value) {
       !Number.isFinite(windDirectionDeg) || windDirectionDeg < 0 || windDirectionDeg >= 360 ||
       !Number.isFinite(receivedAt) || receivedAt <= 0) return null;
   return {
+    ...(value.directionProcessing === 'server' && Number.isFinite(value.rawWindDirectionDeg) && value.rawWindDirectionDeg >= 0 && value.rawWindDirectionDeg < 360 ? {
+      directionProcessing: 'server', rawWindDirectionDeg: value.rawWindDirectionDeg,
+      directionSensorValid: value.directionSensorValid === true,
+      directionBackendFresh: value.directionBackendFresh === true,
+      ...(value.directionSample && Number.isFinite(value.directionSample.rawDeg) && value.directionSample.rawDeg >= 0 && value.directionSample.rawDeg < 360 && Number.isSafeInteger(value.directionSample.capturedAt) && value.directionSample.samples >= 30 ? {
+        directionSample: { rawDeg: value.directionSample.rawDeg, capturedAt: value.directionSample.capturedAt, samples: value.directionSample.samples },
+      } : {}),
+    } : {}),
     windSpeedKmh,
     windDirectionDeg,
     receivedAt,
