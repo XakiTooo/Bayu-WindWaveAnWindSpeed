@@ -2,21 +2,16 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-const devices = {
-  sender: { title: 'Pengirim luar', description: 'Hall effect, AS5600, GPS, dan pengiriman MQTT.', filename: 'BAYU_Pengirim_Web.ino', libraries: 'ArduinoJson 7.x dan TinyGPSPlus' },
-  receiver: { title: 'Penerima dalam', description: 'LCD, LED, buzzer, dan penerimaan data MQTT.', filename: 'BAYU_Penerima_Web.ino', libraries: 'ArduinoJson 7.x dan LiquidCrystal I2C' },
-};
-
 export default function StationSetupDialog({ station, online, onClose }) {
-  const [role, setRole] = useState('sender');
-  const [network, setNetwork] = useState({ wifiSsid: '', wifiPassword: '', mqttUsername: '', mqttPassword: '' });
+  const [network, setNetwork] = useState({ wifiSsid: '', wifiPassword: '', mqttUsername: station.id.toLowerCase(), mqttPassword: '' });
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
   const closeButton = useRef(null);
   const pending = useRef(null);
-  const device = devices[role];
+  const filename = "BAYU_Koneksi_MQTT.ino";
+  const topic = `bayu/stations/${station.id.toLowerCase()}/telemetry`;
 
   useEffect(() => {
     const previousFocus = document.activeElement;
@@ -48,7 +43,7 @@ export default function StationSetupDialog({ station, online, onClose }) {
     try {
       const response = await fetch(`/api/stations/${encodeURIComponent(station.id.toLowerCase())}/firmware`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role, ...network }), signal: controller.signal,
+        body: JSON.stringify({ kind: 'connection', role: 'sender', ...network }), signal: controller.signal,
       });
       const text = await response.text();
       if (!response.ok) {
@@ -70,7 +65,7 @@ export default function StationSetupDialog({ station, online, onClose }) {
   function download() {
     const url = URL.createObjectURL(new Blob([code], { type: 'text/plain;charset=utf-8' }));
     const anchor = document.createElement('a');
-    anchor.href = url; anchor.download = device.filename; anchor.click();
+    anchor.href = url; anchor.download = filename; anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
@@ -95,10 +90,12 @@ export default function StationSetupDialog({ station, online, onClose }) {
       </header>
       <div className={`setup-connection ${online ? 'connected' : ''}`} role="status"><i /><span>{online ? 'Data alat sudah diterima' : 'Menunggu data pertama dari alat'}</span><code>{station.id.toLowerCase()}</code></div>
       <form onSubmit={prepare}>
-        <fieldset className="setup-device-options" disabled={busy}>
-          <legend>Pilih ESP yang akan diprogram</legend>
-          {Object.entries(devices).map(([key, value]) => <button key={key} type="button" aria-pressed={role === key} className={role === key ? 'selected' : ''} onClick={() => { setRole(key); setCode(''); setCopied(false); setError(''); }}><b>{value.title}</b><span>{value.description}</span></button>)}
-        </fieldset>
+        <section className="setup-mqtt">
+          <h3>Akun MQTT perangkat</h3>
+          <p>Gunakan akun khusus stasiun ini. Di EMQX, pengelola perlu mendaftarkan akun dan memberi izin publish ke topik berikut.</p>
+          <code>{topic}</code>
+          <p>Untuk contoh pengirim ini, batasi izin ke topik di atas. Akun login dashboard terpisah dari akun MQTT.</p>
+        </section>
         <fieldset className="setup-network" disabled={busy}>
           <legend>Koneksi alat</legend>
           <p>Kosongkan isian yang ingin dilengkapi nanti di Arduino IDE.</p>
@@ -106,23 +103,29 @@ export default function StationSetupDialog({ station, online, onClose }) {
             <label>Nama Wi-Fi 2,4 GHz<input value={network.wifiSsid} maxLength={32} autoComplete="off" placeholder="Wi-Fi tempat alat dipasang" onChange={(e) => updateNetwork('wifiSsid', e.target.value)} /></label>
             <label>Password Wi-Fi<input type="password" autoComplete="new-password" value={network.wifiPassword} maxLength={128} placeholder="Password jaringan" onChange={(e) => updateNetwork('wifiPassword', e.target.value)} /></label>
           </div>
-          <details className="setup-mqtt"><summary>Kredensial MQTT alat</summary><p>Gunakan akun perangkat dari pengelola BAYU. Broker dan topik stasiun sudah disiapkan dalam kode.</p>
-            <div className="setup-field-grid">
-              <label>Username MQTT<input value={network.mqttUsername} maxLength={256} autoComplete="off" onChange={(e) => updateNetwork('mqttUsername', e.target.value)} /></label>
-              <label>Password MQTT<input type="password" value={network.mqttPassword} maxLength={256} autoComplete="new-password" onChange={(e) => updateNetwork('mqttPassword', e.target.value)} /></label>
-            </div>
-          </details>
+          <div className="setup-field-grid">
+            <label>Username MQTT<input required value={network.mqttUsername} maxLength={256} autoComplete="off" onChange={(e) => updateNetwork('mqttUsername', e.target.value)} /></label>
+            <label>Password MQTT<input required type="password" value={network.mqttPassword} maxLength={256} autoComplete="new-password" onChange={(e) => updateNetwork('mqttPassword', e.target.value)} /></label>
+          </div>
+          <button type="button" className="setup-copy" onClick={() => {
+            const password = Array.from(crypto.getRandomValues(new Uint8Array(18)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+            updateNetwork('mqttPassword', password);
+          }}>Buat password MQTT</button>
+          {network.mqttPassword && <button type="button" className="setup-copy" onClick={async () => {
+            try { await navigator.clipboard.writeText(network.mqttPassword); }
+            catch { setError('Browser tidak mengizinkan penyalinan password.'); }
+          }}>Salin password untuk EMQX</button>}
         </fieldset>
         {error && <p className="setup-error" role="alert">{error}</p>}
-        <button className="primary-button setup-generate" type="submit" disabled={busy}>{busy ? 'Menyiapkan sketch…' : code ? 'Buat ulang kode lengkap' : 'Buat kode lengkap ESP32'}</button>
+        <button className="primary-button setup-generate" type="submit" disabled={busy}>{busy ? 'Menyiapkan sketch…' : code ? 'Perbarui contoh koneksi' : 'Buat contoh koneksi ESP32'}</button>
       </form>
       {code && <section className="setup-result" aria-label="Sketch siap digunakan" aria-live="polite">
-        <div className="setup-result-heading"><div><b>Sketch {device.title.toLowerCase()} siap</b><p>Sudah mencakup pembacaan alat, koneksi TLS, dan komunikasi MQTT.</p></div></div>
-        <div className="setup-download-actions"><button className="primary-button" onClick={download}>Unduh .ino lengkap</button><button className="setup-copy" onClick={copy}>{copied ? 'Kode tersalin' : 'Salin seluruh kode'}</button></div>
-        <details className="setup-code-preview"><summary>Lihat kode lengkap</summary><textarea aria-label="Kode Arduino lengkap" readOnly spellCheck={false} value={code} /></details>
-        <ol className="setup-upload-guide"><li>Buka <strong>{device.filename}</strong> di Arduino IDE.</li><li>Pilih <strong>ESP32 Dev Module</strong>, lalu install {device.libraries}.</li><li>Lengkapi isian <code>YOUR_…</code> jika masih ada, pilih port ESP, lalu upload.</li><li>Buka Serial Monitor pada <strong>115200 baud</strong>. Status di atas berubah setelah telemetri masuk.</li></ol>
+        <div className="setup-result-heading"><div><b>Contoh koneksi siap</b><p>ID stasiun, broker TLS, kredensial, dan format telemetri sudah terisi. Hubungkan fungsi publishWind dengan pembacaan sensormu.</p></div></div>
+        <div className="setup-download-actions"><button className="primary-button" onClick={download}>Unduh .ino</button><button className="setup-copy" onClick={copy}>{copied ? 'Kode tersalin' : 'Salin kode'}</button></div>
+        <details className="setup-code-preview"><summary>Lihat kode koneksi</summary><textarea aria-label="Kode koneksi Arduino" readOnly spellCheck={false} value={code} /></details>
+        <ol className="setup-upload-guide"><li>Buka <strong>{filename}</strong> di Arduino IDE.</li><li>Pilih <strong>ESP32 Dev Module</strong>, lalu pasang PubSubClient dan ArduinoJson 7.</li><li>Lengkapi isian <code>YOUR_…</code> jika masih ada, pilih port ESP, lalu upload.</li><li>Buka Serial Monitor pada <strong>115200 baud</strong>. Status di atas berubah setelah telemetri masuk.</li></ol>
       </section>}
-      <footer className="setup-footer"><span>Kode dan pengaturan terpisah untuk setiap pasangan alat.</span><button type="button" className="setup-copy" onClick={onClose}>Selesai</button></footer>
+      <footer className="setup-footer"><span>Simpan kode yang sudah berisi password di perangkatmu sendiri.</span><button type="button" className="setup-copy" onClick={onClose}>Selesai</button></footer>
     </section>
   </div>;
 }

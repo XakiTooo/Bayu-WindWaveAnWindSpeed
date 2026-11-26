@@ -1,6 +1,6 @@
 import { currentUser } from '@/lib/auth-store.mjs';
 import { sameOrigin } from '@/lib/admin-session.mjs';
-import { listStations, registerStation, stationTopics } from '@/lib/station-registry.mjs';
+import { listVisibleStations, registerStation, stationTopics } from '@/lib/station-registry.mjs';
 
 export const runtime = 'nodejs';
 const headers = { 'Cache-Control': 'private, no-store' };
@@ -8,8 +8,7 @@ const headers = { 'Cache-Control': 'private, no-store' };
 export async function GET(request) {
   try {
     const user = await currentUser(request);
-    if (!user) return Response.json({ error: 'Silakan masuk.' }, { status: 401, headers });
-    return Response.json({ stations: await listStations(user) }, { headers });
+    return Response.json({ stations: await listVisibleStations(user) }, { headers });
   } catch { return Response.json({ error: 'Daftar stasiun belum tersedia.' }, { status: 503, headers }); }
 }
 

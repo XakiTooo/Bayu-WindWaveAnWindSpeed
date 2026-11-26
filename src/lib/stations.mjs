@@ -16,7 +16,7 @@ export function createCustomStation(input, existing = []) {
     throw new Error('Latitude harus antara -90 dan 90, longitude antara -180 dan 180.');
   }
   return { id, name, lat, lng, fallbackLat: lat, fallbackLng: lng, custom: true,
-    base: 0, speed: 0, angle: 0, battery: null, online: false, updated: 0, samples: [] };
+    base: 0, speed: 0, angle: 0, online: false, updated: 0, samples: [] };
 }
 
 export function restoreCustomStations(value) {

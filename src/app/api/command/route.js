@@ -100,7 +100,7 @@ export async function POST(request) {
     }
     const stationId = target.toLowerCase();
     const station = await getStation(stationId);
-    if (!canManageStation(user, station)) return Response.json({ error: 'Akses stasiun ditolak.' }, { status: 403, headers });
+    if (!station || !canManageStation(user, station)) return Response.json({ error: 'Akses stasiun ditolak.' }, { status: 403, headers });
 
     const validActions = ['calibrate_four', 'calibrate_zero', 'buzzer_mute', 'buzzer_unmute', 'request_telemetry', 'apply_settings'];
     if (!validActions.includes(action)) {

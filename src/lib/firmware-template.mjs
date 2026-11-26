@@ -30,3 +30,77 @@ export function renderFirmware(source, stationId, input, brokerUrl) {
   }
   return result;
 }
+
+export function renderConnectionExample(source, stationId, input, brokerUrl) {
+  const config = renderFirmware(source, stationId, input, brokerUrl);
+  const values = ['StationId', 'WifiSsid', 'WifiPassword', 'MqttUsername', 'MqttPassword']
+    .map((name) => config.split('\n').find((line) => line.startsWith('constexpr char ' + name + '[')))
+    .join('\n');
+  const cert = config.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0];
+  if (!cert) throw new Error('Sertifikat broker tidak tersedia.');
+  const broker = new URL(brokerUrl);
+  return `// BAYU MQTT TLS: contoh integrasi perangkat, bukan firmware sensor.
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <time.h>
+#include <math.h>
+
+${values}
+constexpr char BrokerHost[] = ${JSON.stringify(broker.hostname)};
+constexpr uint16_t BrokerPort = ${Number(broker.port || 8883)};
+constexpr char RootCA[] = R"PEM(${cert})PEM";
+
+WiFiClientSecure tls;
+PubSubClient mqtt(tls);
+String clientId;
+String topic;
+unsigned long nextRetry = 0;
+
+// Panggil dengan hasil pengukuran sendiri: km/jam dan arah 0 sampai <360 derajat.
+bool publishWind(float speedKmh, float directionDeg) {
+  if (!mqtt.connected() || !isfinite(speedKmh) || speedKmh < 0 ||
+      !isfinite(directionDeg) || directionDeg < 0 || directionDeg >= 360) return false;
+  JsonDocument payload;
+  payload["stationId"] = StationId;
+  payload["windSpeedKmh"] = speedKmh;
+  payload["windDirectionDeg"] = directionDeg;
+  char message[192];
+  if (measureJson(payload) >= sizeof(message)) return false;
+  serializeJson(payload, message, sizeof(message));
+  return mqtt.publish(topic.c_str(), message, false);
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(WifiSsid, WifiPassword);
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  tls.setCACert(RootCA);
+  mqtt.setServer(BrokerHost, BrokerPort);
+  mqtt.setBufferSize(512);
+  clientId = String("bayu-") + StationId + "-" + WiFi.macAddress();
+  clientId.replace(":", "");
+  topic = String("bayu/stations/") + StationId + "/telemetry";
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED || time(nullptr) < 1700000000) return;
+  if (!mqtt.connected()) {
+    if ((long)(millis() - nextRetry) < 0) return;
+    nextRetry = millis() + 5000;
+    if (mqtt.connect(clientId.c_str(), MqttUsername, MqttPassword)) {
+      Serial.println("MQTT terhubung");
+    } else {
+      Serial.printf("MQTT belum terhubung (status %d)\\n", mqtt.state());
+    }
+    return;
+  }
+  mqtt.loop();
+  // Tambahkan pembacaan sensor dan jadwal pengirimanmu di sini.
+  // Panggil publishWind(kecepatanKmh, arahDerajat) saat pengukuran baru tersedia.
+}
+`;
+}

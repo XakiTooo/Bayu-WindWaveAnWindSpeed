@@ -132,3 +132,15 @@ export async function setUserEnabled(username, enabled, actor) {
   await ref.update({ enabled, updatedAt: Date.now(), updatedBy: actor });
   return { ...publicUser(id, snapshot.data()), enabled };
 }
+
+export async function registerUser(input) {
+  const username = typeof input?.username === 'string' ? cleanUsername(input.username) : null;
+  const name = typeof input?.name === 'string' ? input.name.trim() : '';
+  if (!username || username === 'admin' || username.startsWith('g_') || !name || name.length > 80 ||
+      typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) {
+    throw new Error('Data akun tidak valid.');
+  }
+  // Never accept the role from an anonymous caller.
+  await createUser({ username, name, password: input.password, role: 'viewer' }, 'self-registration');
+  return loginUser(username, input.password);
+}

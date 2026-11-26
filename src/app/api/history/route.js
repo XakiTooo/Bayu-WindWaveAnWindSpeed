@@ -1,4 +1,4 @@
-import { canReadStation } from '@/lib/station-access.mjs';
+import { stationReadScope } from '@/lib/station-access.mjs';
 import { getStation, applyWebConfiguration } from '@/lib/station-registry.mjs';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getDashboardAdminApp } from '@/lib/firebase-admin';
@@ -13,7 +13,8 @@ export async function GET(request) {
     return Response.json({ error: 'ID stasiun tidak valid.' }, { status: 400, headers });
   }
   try {
-    if (!(await canReadStation(request, stationId))) return Response.json({ error: 'Akses tidak valid.' }, { status: 403, headers });
+    const scope = await stationReadScope(request, stationId);
+    if (!scope) return Response.json({ error: 'Akses tidak valid.' }, { status: 403, headers });
     const station = await getStation(stationId);
     const snapshot = await getFirestore(getDashboardAdminApp()).collection(`stations/${stationId}/${process.env.BAYU_LOCAL_WORKER === '1' ? 'processedReadings' : 'readings'}`)
       .orderBy('receivedAt', 'desc').limit(200).get();
@@ -21,9 +22,10 @@ export async function GET(request) {
       const data = doc.data();
       const timestamp = data.receivedAt?.toMillis?.();
       return { timestamp, id: stationId.toUpperCase(), speed: data.windSpeedKmh,
-        angle: applyWebConfiguration(data, station?.settings, station?.directionCalibration).windDirectionDeg, battery: data.battery ?? null,
-        lat: data.gps?.fix ? data.gps.lat : data.lat,
-        lng: data.gps?.fix ? data.gps.lon : data.lng ?? data.lon,
+        angle: applyWebConfiguration(data, station?.settings, station?.directionCalibration).windDirectionDeg, ...(scope === 'private' ? {
+          lat: data.gps?.fix ? data.gps.lat : data.lat,
+          lng: data.gps?.fix ? data.gps.lon : data.lng ?? data.lon,
+        } : {}),
         source: 'mqtt', dataType: 'HARDWARE_REAL' };
     }).filter((row) => Number.isFinite(row.timestamp) && Number.isFinite(row.speed));
     return Response.json({ rows }, { headers });

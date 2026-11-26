@@ -80,14 +80,15 @@ function start() {
     }
 
     const receivedAt = Date.now();
-    if (reading.directionProcessing === 'server') {
-      try {
-        const registry = (await firestore.doc(`stationRegistry/${reading.stationId}`).get()).data();
+    try {
+      const registry = (await firestore.doc(`stationRegistry/${reading.stationId}`).get()).data();
+      if (registry?.deletedAt) return;
+      if (reading.directionProcessing === 'server') {
         reading = applyWebConfiguration(reading, registry?.settings, registry?.directionCalibration);
-      } catch (error) {
-        console.error('Kalibrasi backend belum tersedia:', error.code ?? error.name);
-        return;
       }
+    } catch (error) {
+      console.error('Registri stasiun belum tersedia:', error.code ?? error.name);
+      return;
     }
     if (telegramToken && telegramChatId && Number.isFinite(alertThreshold) && alertThreshold > 0 &&
         reading.windSpeedKmh >= alertThreshold && receivedAt - (lastAlerts.get(reading.stationId) || 0) >= alertCooldownMs) {
