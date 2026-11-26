@@ -1,4 +1,4 @@
-import { getStation, applyWebConfiguration } from '@/lib/station-registry.mjs';
+import { getStationEntry, applyWebConfiguration } from '@/lib/station-registry.mjs';
 import { publishProcessedDirection } from '@/lib/publish-direction.mjs';
 import { timingSafeEqual } from 'node:crypto';
 import { getDatabase } from 'firebase-admin/database';
@@ -39,11 +39,12 @@ export async function POST(request) {
   }
 
   try {
+    const station = await getStationEntry(stationId);
+    if (station?.deletedAt) return Response.json({ ok: true, ignored: true });
     const app = getDashboardAdminApp();
     const latest = getDatabase(app).ref(`stations/${stationId}/latest`);
     const minute = Math.floor(receivedAt / 60_000);
     const history = getFirestore(app).doc(`stations/${stationId}/readings/${minute}`);
-    const station = await getStation(stationId);
     const data = { stationId, ...(reading.directionProcessing === 'server' ? applyWebConfiguration(reading, station?.settings, station?.directionCalibration) : reading) };
     const [realtime, historical] = await Promise.allSettled([
       latest.transaction((current) => current?.receivedAt >= receivedAt ? undefined : data),

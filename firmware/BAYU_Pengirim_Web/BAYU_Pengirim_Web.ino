@@ -3,11 +3,13 @@
 /*
  * BAYU_Pengirim_Web
  * Pembacaan Hall effect, AS5600 dan GPS; konfigurasi alarm diterima dari backend melalui MQTT /config.
- * Koneksi MQTT TLS ke EMQX. ID, Wi-Fi dan kredensial di config.h.
+ * Wi-Fi dapat disetel lewat halaman lokal. ID dan kredensial MQTT di bawah.
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebServer.h>
+#include <esp_random.h>
 #include <Wire.h>
 #include <Preferences.h>
 #include <TinyGPSPlus.h>
@@ -18,7 +20,7 @@
 // ===== KONFIGURASI ALAT: EDIT DI BAGIAN INI =====
 constexpr char StationId[] = "YOUR_STATION_ID";
 
-// Copy to config.h in this folder and fill in the ESP32 Wi-Fi and MQTT details.
+// Wi-Fi bawaan dipakai sebelum jaringan baru disimpan dari halaman setup.
 constexpr char WifiSsid[] = "YOUR_2_4_GHZ_WIFI";
 constexpr char WifiPassword[] = "YOUR_WIFI_PASSWORD";
 constexpr char MqttUsername[] = "YOUR_MQTT_USERNAME";
@@ -107,6 +109,28 @@ const uint32_t MUTE_SNOOZE_MS = 300000UL; // 5 Menit (5 * 60 * 1000 ms)
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(2);
 Preferences prefs;
+WebServer wifiSetupServer(80);
+String activeWifiSsid;
+String activeWifiPassword;
+String candidateWifiSsid;
+String candidateWifiPassword;
+String wifiSetupToken;
+char wifiSetupName[32];
+char wifiSetupPassword[13];
+const char* wifiSetupStatus = "Masukkan jaringan Wi-Fi 2,4 GHz untuk pengirim.";
+bool wifiSetupOpen = false;
+bool wifiSetupKeepOpen = false;
+bool wifiCandidatePending = false;
+bool wifiCandidateTesting = false;
+uint32_t wifiSetupOpenedAt = 0;
+uint32_t wifiCandidateStartedAt = 0;
+uint32_t wifiOfflineSince = 0;
+uint32_t lastWifiRetry = 0;
+constexpr uint32_t WIFI_RETRY_MS = 10000;
+constexpr uint32_t WIFI_SETUP_DELAY_MS = 25000;
+constexpr uint32_t WIFI_TEST_MS = 20000;
+constexpr uint32_t WIFI_SETUP_IDLE_MS = 600000;
+constexpr uint32_t WIFI_SETUP_HOLD_MS = 4000;
 
 esp_mqtt_client_handle_t mqttClient = nullptr;
 std::atomic<bool> mqttConnected{false};
@@ -665,7 +689,207 @@ void handleSerialCommands() {
   }
 }
 
+bool validWifiSettings(const String& ssid, const String& password) {
+  return ssid.length() > 0 && ssid.length() <= 32 &&
+    (password.isEmpty() || (password.length() >= 8 && password.length() <= 63)) &&
+    strlen(ssid.c_str()) == ssid.length() && strlen(password.c_str()) == password.length();
+}
+
+void connectWifi(const String& ssid, const String& password) {
+  lastWifiRetry = millis();
+  if (ssid.isEmpty()) return;
+  Serial.printf("[WIFI] Menghubungkan ke '%s'...\n", ssid.c_str());
+  WiFi.begin(ssid.c_str(), password.c_str());
+}
+
+bool isWifiSetupRequest() {
+  if (wifiSetupOpen && wifiSetupServer.client().localIP() == WiFi.softAPIP()) return true;
+  wifiSetupServer.send(404, "text/plain", "Not found");
+  return false;
+}
+
+void showWifiSetupPage() {
+  if (!isWifiSetupRequest()) return;
+  const bool testing = wifiCandidatePending || wifiCandidateTesting;
+  String page = R"HTML(<!doctype html><html lang="id"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Setup Wi-Fi BAYU</title><style>
+body{font:16px system-ui;margin:3rem auto;padding:0 1.25rem;max-width:30rem;color:#163d33}
+label{display:block;margin-top:1rem}input,button{box-sizing:border-box;width:100%;padding:.65rem;font:inherit}
+button{margin-top:1.25rem;background:#163d33;color:white;border:0;border-radius:.3rem}
+</style><h1>Wi-Fi pengirim BAYU</h1><p>)HTML";
+  page += wifiSetupStatus;
+  page += "</p>";
+  if (testing) {
+    page += "<p><a href='/'>Cek status koneksi</a></p>";
+  } else {
+    page += "<form method='post' action='/wifi'><input type='hidden' name='token' value='";
+    page += wifiSetupToken;
+    page += R"HTML('><label>Nama Wi-Fi <input name="ssid" maxlength="32" required></label>
+<label>Password Wi-Fi <input name="password" type="password" maxlength="63"></label>
+<p>Kosongkan password hanya untuk jaringan terbuka.</p>
+<button>Simpan dan hubungkan</button></form>)HTML";
+  }
+  page += "</html>";
+  wifiSetupServer.sendHeader("Cache-Control", "no-store");
+  wifiSetupServer.send(200, "text/html; charset=utf-8", page);
+}
+
+void submitWifiSetup() {
+  if (!isWifiSetupRequest()) return;
+  if (wifiSetupServer.arg("token") != wifiSetupToken) {
+    wifiSetupServer.send(403, "text/plain", "Buka kembali halaman setup.");
+    return;
+  }
+  if (wifiCandidatePending || wifiCandidateTesting) {
+    wifiSetupServer.send(409, "text/plain", "Pengujian masih berjalan.");
+    return;
+  }
+  const String ssid = wifiSetupServer.arg("ssid");
+  const String password = wifiSetupServer.arg("password");
+  if (!validWifiSettings(ssid, password)) {
+    wifiSetupServer.send(400, "text/plain", "Nama Wi-Fi 1-32 byte. Password kosong atau 8-63 byte.");
+    return;
+  }
+  candidateWifiSsid = ssid;
+  candidateWifiPassword = password;
+  wifiCandidatePending = true;
+  wifiSetupStatus = "ESP32 sedang mencoba Wi-Fi baru. Hotspot setup akan ditutup jika berhasil.";
+  wifiSetupServer.sendHeader("Location", "/");
+  wifiSetupServer.send(303, "text/plain", "");
+}
+
+void printWifiSetupAccess() {
+  Serial.printf("[SETUP WI-FI] Hotspot: %s | Password: %s | Buka http://%s\n",
+    wifiSetupName, wifiSetupPassword, WiFi.softAPIP().toString().c_str());
+}
+
+void openWifiSetup(bool requested) {
+  wifiSetupKeepOpen = wifiSetupKeepOpen || requested;
+  wifiSetupOpenedAt = millis();
+  if (wifiSetupOpen) {
+    if (requested) printWifiSetupAccess();
+    return;
+  }
+  WiFi.mode(WIFI_AP_STA);
+  const uint32_t suffix = static_cast<uint32_t>(ESP.getEfuseMac() & 0xFFFFFF);
+  char token[17];
+  snprintf(wifiSetupName, sizeof(wifiSetupName), "BAYU-Pengirim-%06lX", static_cast<unsigned long>(suffix));
+  const String savedSetupPassword = prefs.getString("wifiSetupKey", "");
+  if (savedSetupPassword.length() == sizeof(wifiSetupPassword) - 1) {
+    savedSetupPassword.toCharArray(wifiSetupPassword, sizeof(wifiSetupPassword));
+  } else {
+    snprintf(wifiSetupPassword, sizeof(wifiSetupPassword), "%04lX%08lX",
+      static_cast<unsigned long>(esp_random() & 0xFFFF), static_cast<unsigned long>(esp_random()));
+    if (prefs.putString("wifiSetupKey", wifiSetupPassword) != sizeof(wifiSetupPassword) - 1) {
+      Serial.println(F("[SETUP WI-FI] Password hotspot hanya berlaku selama sesi ini."));
+    }
+  }
+  snprintf(token, sizeof(token), "%08lX%08lX",
+    static_cast<unsigned long>(esp_random()), static_cast<unsigned long>(esp_random()));
+  if (!WiFi.softAP(wifiSetupName, wifiSetupPassword, 1, false, 2)) {
+    WiFi.mode(WIFI_STA);
+    Serial.println(F("[SETUP WI-FI] Gagal membuka hotspot."));
+    return;
+  }
+  wifiSetupToken = token;
+  wifiSetupStatus = "Masukkan jaringan Wi-Fi 2,4 GHz untuk pengirim.";
+  wifiSetupServer.begin();
+  wifiSetupOpen = true;
+  printWifiSetupAccess();
+}
+
+void closeWifiSetup() {
+  wifiSetupServer.stop();
+  WiFi.softAPdisconnect(true);
+  wifiSetupOpen = false;
+  wifiSetupKeepOpen = false;
+  wifiSetupToken = "";
+  memset(wifiSetupPassword, 0, sizeof(wifiSetupPassword));
+}
+
+void beginWifi() {
+  JsonDocument storedWifi;
+  if (!deserializeJson(storedWifi, prefs.getString("wifiStation", ""))) {
+    activeWifiSsid = storedWifi["ssid"] | "";
+    activeWifiPassword = storedWifi["password"] | "";
+  }
+  if (!validWifiSettings(activeWifiSsid, activeWifiPassword)) {
+    activeWifiSsid = strcmp(WifiSsid, "YOUR_2_4_GHZ_WIFI") == 0 ? "" : WifiSsid;
+    activeWifiPassword = WifiPassword;
+  }
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(false);
+  wifiSetupServer.on("/", HTTP_GET, showWifiSetupPage);
+  wifiSetupServer.on("/wifi", HTTP_POST, submitWifiSetup);
+  wifiOfflineSince = millis();
+  if (activeWifiSsid.isEmpty()) openWifiSetup(false);
+  else connectWifi(activeWifiSsid, activeWifiPassword);
+}
+
+bool serviceWifi() {
+  if (wifiSetupOpen) wifiSetupServer.handleClient();
+  const uint32_t now = millis();
+  if (wifiCandidatePending) {
+    wifiCandidatePending = false;
+    wifiCandidateTesting = true;
+    wifiCandidateStartedAt = now;
+    WiFi.disconnect(false, false);
+    connectWifi(candidateWifiSsid, candidateWifiPassword);
+    return false;
+  }
+  const bool connected = WiFi.status() == WL_CONNECTED;
+  if (wifiCandidateTesting) {
+    const uint32_t elapsed = now - wifiCandidateStartedAt;
+    if (elapsed >= 500 && connected && WiFi.SSID() == candidateWifiSsid) {
+      JsonDocument config;
+      config["ssid"] = candidateWifiSsid;
+      config["password"] = candidateWifiPassword;
+      String serialized;
+      serializeJson(config, serialized);
+      if (prefs.putString("wifiStation", serialized) == serialized.length()) {
+        activeWifiSsid = candidateWifiSsid;
+        activeWifiPassword = candidateWifiPassword;
+        wifiCandidateTesting = false;
+        candidateWifiSsid = "";
+        candidateWifiPassword = "";
+        closeWifiSetup();
+        Serial.println(F("[SETUP WI-FI] Jaringan baru tersimpan."));
+        return true;
+      }
+      wifiSetupStatus = "Wi-Fi tersambung, tetapi pengaturan gagal disimpan. Silakan coba lagi.";
+    } else if (elapsed < WIFI_TEST_MS) {
+      return false;
+    } else {
+      wifiSetupStatus = "Wi-Fi baru belum tersambung. Periksa nama dan password, lalu coba lagi.";
+    }
+    wifiCandidateTesting = false;
+    candidateWifiSsid = "";
+    candidateWifiPassword = "";
+    wifiSetupKeepOpen = true;
+    WiFi.disconnect(false, false);
+    connectWifi(activeWifiSsid, activeWifiPassword);
+    return false;
+  }
+  if (connected) {
+    wifiOfflineSince = now;
+    if (wifiSetupOpen && (!wifiSetupKeepOpen || now - wifiSetupOpenedAt >= WIFI_SETUP_IDLE_MS)) closeWifiSetup();
+    return true;
+  }
+  if (!wifiSetupOpen && now - wifiOfflineSince >= WIFI_SETUP_DELAY_MS && now - wifiSetupOpenedAt >= WIFI_RETRY_MS) {
+    openWifiSetup(false);
+  }
+  if (!activeWifiSsid.isEmpty() && now - lastWifiRetry >= WIFI_RETRY_MS) {
+    WiFi.reconnect();
+    lastWifiRetry = now;
+  }
+  return false;
+}
+
 void handleButtonInput() {
+  static uint32_t pressedAt = 0;
+  static bool setupRequested = false;
   int reading = digitalRead(PIN_BUTTON);
   unsigned long now = millis();
 
@@ -677,7 +901,10 @@ void handleButtonInput() {
     if (reading != stableButtonState) {
       stableButtonState = reading;
       if (stableButtonState == LOW) {
-        Serial.println(F("[TOMBOL NODE 1] Ditekan!"));
+        pressedAt = now;
+        setupRequested = false;
+      } else if (!setupRequested) {
+        Serial.println(F("[TOMBOL NODE 1] Tekan singkat."));
         if (currentState != STATE_NORMAL_SAFE) {
           globalMuted = true;
           muteStartTime = millis();
@@ -689,6 +916,10 @@ void handleButtonInput() {
         }
       }
     }
+  }
+  if (reading == LOW && stableButtonState == LOW && !setupRequested && now - pressedAt >= WIFI_SETUP_HOLD_MS) {
+    setupRequested = true;
+    openWifiSetup(true);
   }
   lastButtonReading = reading;
 }
@@ -753,12 +984,7 @@ void setup() {
   setRGB(false, false, true); delay(150);
   setRGB(false, true, false);
 
-  // Inisialisasi Wi-Fi Station
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
-  Serial.printf("[WIFI] Menghubungkan ke '%s'...\n", WifiSsid);
-  WiFi.begin(WifiSsid, WifiPassword);
-  WiFi.setDNS(IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
+  beginWifi();
 
   // Pasang interrupt anemometer
   attachInterrupt(digitalPinToInterrupt(PIN_ANEMOMETER), isrAnemometer, FALLING);
@@ -801,8 +1027,7 @@ void loop() {
   }
 
   // 3. Manajemen Wi-Fi & Auto-Connect MQTT dengan NTP
-  bool isWifiConnected = (WiFi.status() == WL_CONNECTED);
-  static uint32_t lastWifiRetry = 0;
+  const bool isWifiConnected = serviceWifi();
 
   if (isWifiConnected && !wifiWasConnected) {
     wifiWasConnected = true;
@@ -811,13 +1036,6 @@ void loop() {
     configTime(0, 0, "pool.ntp.org", "time.google.com");
   } else if (!isWifiConnected) {
     wifiWasConnected = false;
-    // Coba sambung ulang otomatis setiap 7 detik jika terputus/gagal
-    if (now - lastWifiRetry >= 7000) {
-      lastWifiRetry = now;
-      Serial.printf("[WIFI] Sedang mencoba menyambung ke '%s'...\n", WifiSsid);
-      WiFi.disconnect();
-      WiFi.begin(WifiSsid, WifiPassword);
-    }
   }
 
   // Hubungkan ke MQTT jika Wi-Fi sudah tersambung

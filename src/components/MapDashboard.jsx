@@ -22,6 +22,20 @@ import {
 } from '@/lib/simulation.mjs';
 import { createCustomStation, restoreCustomStations, defaultStationDraft, applyStationTelemetry, removeCustomStation } from '@/lib/stations.mjs';
 
+function canManageListedStation(user, station) {
+  return Boolean(station?.registered && user.role !== 'guest' &&
+    (user.role === 'admin' || station.ownerId === user.username));
+}
+
+function trapDialogFocus(event) {
+  if (event.key !== 'Tab') return;
+  const controls = [...event.currentTarget.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)')]
+    .filter((element) => element.getClientRects().length);
+  const first = controls[0], last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+}
+
 const WindMap = dynamic(() => import('./WindMap'), { ssr: false, loading: () => <div className="map-loading">Memuat peta…</div> });
 
 const initial = {
@@ -31,8 +45,8 @@ const initial = {
   history: [],
   dataSource: 'live',
   soundAlert: true,
-  shareKey: '',
   liveStatus: 'polling',
+  sessionRevision: 0,
   user: { username: 'guest', role: 'guest', name: 'Tamu Publik' },
   externalWeather: null,
 };
@@ -49,7 +63,6 @@ function reducer(model, action) {
         history: [],
         dataSource: 'live',
         soundAlert: action.soundAlert ?? true,
-        shareKey: action.shareKey || '',
         user: action.user || { username: 'guest', role: 'guest', name: 'Tamu Publik' },
       };
     }
@@ -66,7 +79,6 @@ function reducer(model, action) {
         id: targetStation.id,
         speed: targetStation.speed,
         angle: ((targetStation.angle % 360) + 360) % 360,
-        battery: targetStation.battery ?? null,
         lat: targetStation.lat,
         lng: targetStation.lng,
         dataType: 'HARDWARE_REAL',
@@ -85,39 +97,33 @@ function reducer(model, action) {
       return { ...model, history: [...existing.values()].sort((a, b) => b.timestamp - a.timestamp).slice(0, 1000) };
     }
     case 'registry': {
-      const defaults = [];
-      const custom = [];
-      for (const entry of action.stations) {
-        const id = entry.id.toUpperCase();
-        const previous = model.stations.find((station) => station.id === id);
-        const restored = { ...(previous || { base: 0, speed: 0, angle: 0, battery: null, online: false, updated: 0, samples: [] }),
-          ...entry, id, fallbackLat: entry.lat, fallbackLng: entry.lng, registered: true,
-          custom: !defaults.some((station) => station.id === id) };
-        const index = defaults.findIndex((station) => station.id === id);
-        if (index >= 0) defaults[index] = restored;
-        else custom.push(restored);
-      }
-      const stations = [...defaults, ...custom];
-      const firstRegistered = stations.findIndex((station) => station.registered);
-      return { ...model, stations, history: [], selected: firstRegistered < 0 ? 0 : firstRegistered };
+      const selectedId = model.stations[model.selected]?.id;
+      const stations = action.stations.map((entry) => ({
+        base: 0, speed: 0, angle: 0, online: false, updated: 0, samples: [],
+        ...entry, id: entry.id.toUpperCase(), fallbackLat: entry.lat, fallbackLng: entry.lng, registered: true, custom: true,
+      }));
+      const index = stations.findIndex((station) => station.id === selectedId);
+      return { ...model, stations, history: [], selected: index < 0 ? null : index };
     }
     case 'station_location': return { ...model, stations: model.stations.map((s) => s.id === action.id ? { ...s, fallbackLat: action.location.lat, fallbackLng: action.location.lng, ...(!s.gpsInfo?.fix ? action.location : {}) } : s) };
     case 'station_settings': return { ...model, stations: model.stations.map((station) => station.id === action.id ? { ...station, settings: action.settings } : station) };
     case 'add_station': return { ...model, stations: [...model.stations, action.station], selected: model.stations.length, dataSource: 'live' };
     case 'remove_station': return removeCustomStation(model, action.id);
     case 'station_unavailable': return { ...model, stations: model.stations.map((s) => s.id === action.id ? { ...s, online: false } : s) };
+    case 'refresh_session': {
+      if (action.revision !== model.sessionRevision) return model;
+      const user = action.authenticated && action.user ? action.user : initial.user;
+      return reducer(model, { type: 'set_user', user, sessionCheck: true });
+    }
     case 'set_user': {
-      return { ...model, user: action.user };
+      if (model.user.username === action.user.username && model.user.role === action.user.role) return { ...model, user: action.user };
+      return { ...model, sessionRevision: model.sessionRevision + (action.sessionCheck ? 0 : 1), user: action.user, stations: [], history: [], selected: null };
     }
     case 'set_weather': return { ...model, externalWeather: action.weather };
     case 'toggle_sound': {
       const soundAlert = !model.soundAlert;
       try { localStorage.setItem('bayu-sound', JSON.stringify(soundAlert)); } catch {}
       return { ...model, soundAlert };
-    }
-    case 'set_share_key': {
-      try { localStorage.setItem('bayu-sharekey', action.key); } catch {}
-      return { ...model, shareKey: action.key };
     }
     case 'set_station_coords': {
       const stations = model.stations.map((s, idx) => {
@@ -134,7 +140,7 @@ function reducer(model, action) {
 
 function Icon({ name, size = 20 }) {
   const paths = {
-    settings: <><circle cx="12" cy="12" r="3"/><path d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 1 3h4l1-3 3-1 2-3-2-2 1-3-3-2-1-3Z"/></>,
+    settings: <><path d="M10 3h4l.6 2.4 1.2.7 2.4-.7 2 3.4-1.8 1.7v1.4l1.8 1.7-2 3.4-2.4-.7-1.2.7L14 19.4h-4L9.4 17l-1.2-.7-2.4.7-2-3.4 1.8-1.7v-1.4L3.8 8.8l2-3.4 2.4.7 1.2-.7L10 3Z" transform="translate(0 .8)"/><circle cx="12" cy="12" r="3"/></>,
     search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" /></>,
     close: <path d="m6 6 12 12M18 6 6 18" />,
     menu: <path d="M4 6h16M4 12h16M4 18h16" />,
@@ -182,11 +188,19 @@ export default function MapDashboard() {
   const [search, setSearch] = useState(''), [listOpen, setListOpen] = useState(false), [tab, setTab] = useState('summary');
   const [clock, setClock] = useState(null), [toast, setToast] = useState('');
   const [focusRequest, setFocusRequest] = useState(0), [fitRequest, setFitRequest] = useState(0);
-  const [threshold, setThreshold] = useState(40), [batteryThreshold, setBatteryThreshold] = useState(20);
-  const [shareKeyInput, setShareKeyInput] = useState('');
+  const [threshold, setThreshold] = useState(40);
   const [dismissedAlarm, setDismissedAlarm] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
+  const [stationFilter, setStationFilter] = useState('all');
+  const dialogRef = useRef(null);
+  const panelBody = useRef(null);
+  const sessionRevision = useRef(model.sessionRevision);
+  sessionRevision.current = model.sessionRevision;
   const [authStorageMode, setAuthStorageMode] = useState('firestore');
+  const [authMode, setAuthMode] = useState('login');
+  const [authName, setAuthName] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
   const [authUsername, setAuthUsername] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [managedUsers, setManagedUsers] = useState([]);
@@ -204,22 +218,34 @@ export default function MapDashboard() {
   const [customLng, setCustomLng] = useState(CENTER[1]);
   const lastSoundRef = useRef(0);
 
-  const { stations, selected, settings, history, dataSource, soundAlert, shareKey, liveStatus, user, externalWeather } = model;
+  const { stations, selected, settings, history, dataSource, soundAlert, liveStatus, user, externalWeather } = model;
   const displayStations = dataSource === 'live'
-    ? stations.filter((s) => user.role !== 'guest' && s.registered)
+    ? stations.filter((s) => s.registered)
     : stations.filter((s) => !s.custom);
 
   const selectedIndex = selected === null ? -1 : displayStations.findIndex((s) => s.id === stations[selected]?.id);
   const validSelected = selectedIndex < 0 ? null : selectedIndex;
   const station = validSelected === null ? null : displayStations[validSelected];
-  const liveStationIds = displayStations.filter((s) => s.registered || (user.role === 'admin' && s.id === 'ANGIN-01')).map((s) => s.id).join(',');
-  const canManage = Boolean(station && user.role !== 'guest' && (user.role === 'admin' || station.ownerId === user.username));
+  const liveStationIds = displayStations.map((s) => s.id).join(',');
+  const canManage = canManageListedStation(user, station);
+  const firstManageableIndex = displayStations.findIndex((entry) => canManageListedStation(user, entry));
   const [googleBusy, setGoogleBusy] = useState(false);
   const [registrationInfo, setRegistrationInfo] = useState(null);
   const closeSetup = useCallback(() => setRegistrationInfo(null), []);
+
+  useEffect(() => {
+    if (user.role === 'guest') {
+      setRegistrationInfo(null);
+      setStationFormOpen(false);
+      setStationFilter('all');
+    }
+    if (user.role !== 'admin') setManagedUsers([]);
+  }, [user.role]);
   const [stationBusy, setStationBusy] = useState(false);
   const [warningThreshold, setWarningThreshold] = useState(5);
   const [directionOffset, setDirectionOffset] = useState(0);
+
+  const [deletingStation, setDeletingStation] = useState(false);
 
   async function refreshRegistry() {
     const response = await fetch('/api/stations', { cache: 'no-store' });
@@ -229,7 +255,6 @@ export default function MapDashboard() {
   }
 
   useEffect(() => {
-    if (user.role === 'guest') { dispatch({ type: 'registry', stations: [] }); return; }
     let active = true;
     fetch('/api/stations', { cache: 'no-store' }).then(async (res) => {
       const data = await res.json();
@@ -244,7 +269,6 @@ export default function MapDashboard() {
     if (!config) return;
     setThreshold(config.dangerKmh);
     setWarningThreshold(config.warningKmh);
-    setBatteryThreshold(config.batteryThreshold);
     setDirectionOffset(config.directionOffsetDeg);
   }, [station?.id, station?.settings]);
 
@@ -253,19 +277,17 @@ export default function MapDashboard() {
     let saved = DEFAULT_SETTINGS;
     let savedSource = 'live';
     let savedSound = true;
-    let savedKey = '';
     let savedUser = { username: 'guest', role: 'guest', name: 'Tamu Publik' };
     let savedCoords = null;
     let savedStations = [];
 
     try {
       const val = JSON.parse(localStorage.getItem('bayu-settings') || 'null');
-      if (val && Number.isFinite(val.threshold) && val.threshold >= 1 && val.threshold <= 120 && Number.isFinite(val.batteryThreshold) && val.batteryThreshold >= 1 && val.batteryThreshold <= 50) saved = val;
+      if (val && Number.isFinite(val.threshold) && val.threshold >= 1 && val.threshold <= 120) saved = val;
       localStorage.removeItem('bayu-datasource');
       const snd = JSON.parse(localStorage.getItem('bayu-sound') || 'true');
       savedSound = Boolean(snd);
-      const k = localStorage.getItem('bayu-sharekey');
-      if (k) savedKey = k;
+      localStorage.removeItem('bayu-sharekey');
       localStorage.removeItem('bayu-user');
       localStorage.removeItem('bayu-stored-users');
       localStorage.removeItem('bayu-telegram');
@@ -282,20 +304,27 @@ export default function MapDashboard() {
       customStations: savedStations,
       dataSource: savedSource,
       soundAlert: savedSound,
-      shareKey: savedKey,
       user: savedUser,
     });
-    fetch('/api/auth', { cache: 'no-store' }).then((res) => res.json()).then((data) => {
-      if (data.mode) setAuthStorageMode(data.mode);
-      if (data.authenticated && data.user) dispatch({ type: 'set_user', user: data.user });
-    }).catch(() => {});
+    let active = true;
+    async function syncSession() {
+      const revision = sessionRevision.current;
+      try {
+        const res = await fetch('/api/auth', { cache: 'no-store' });
+        if (!res.ok || !active) return;
+        const data = await res.json();
+        if (!active) return;
+        if (data.mode) setAuthStorageMode(data.mode);
+        dispatch({ type: 'refresh_session', ...data, revision });
+      } catch {}
+    }
+    syncSession();
+    const sessionTimer = setInterval(syncSession, 60000);
     if (savedCoords) {
       setCustomLat(savedCoords.lat);
       setCustomLng(savedCoords.lng);
     }
     setThreshold(saved.threshold);
-    setBatteryThreshold(saved.batteryThreshold);
-    setShareKeyInput(savedKey);
     setClock(Date.now());
 
     // Fetch external weather once on load
@@ -305,15 +334,11 @@ export default function MapDashboard() {
       .catch(() => {});
 
     const timer = setInterval(() => setClock(Date.now()), 1000);
-    return () => { clearInterval(timer); };
+    return () => { active = false; clearInterval(timer); clearInterval(sessionTimer); };
   }, []);
 
   useEffect(() => {
     if (dataSource !== 'live') return;
-    if (user.role === 'guest' && !shareKey) {
-      dispatch({ type: 'set_live_status', status: 'signed-out' });
-      return;
-    }
     if (!liveStationIds) { dispatch({ type: 'set_live_status', status: 'empty' }); return; }
     let active = true;
     let polling = false;
@@ -323,7 +348,7 @@ export default function MapDashboard() {
       try {
         const statuses = await Promise.all(liveStationIds.split(',').map(async (id) => {
           try {
-            const res = await fetch(`/api/check-data?stationId=${encodeURIComponent(id.toLowerCase())}`, { headers: { 'x-bayu-read-key': shareKey }, signal: AbortSignal.timeout(8000) });
+            const res = await fetch(`/api/check-data?stationId=${encodeURIComponent(id.toLowerCase())}`, { signal: AbortSignal.timeout(8000) });
             const data = await res.json();
             if (!res.ok || !data || data.error || data.stationId?.toLowerCase() !== id.toLowerCase()) throw new Error('Data unavailable');
             if (active) dispatch(data.status === 'waiting' ? { type: 'station_unavailable', id } : { type: 'live_tick', telemetry: data });
@@ -339,9 +364,9 @@ export default function MapDashboard() {
       }
     };
     poll();
-    const interval = setInterval(poll, 3500);
+    const interval = setInterval(poll, user.role === 'guest' ? 12000 : 3500);
     return () => { active = false; clearInterval(interval); };
-  }, [dataSource, shareKey, liveStationIds, user.username, user.role]);
+  }, [dataSource, liveStationIds, user.username, user.role]);
 
   useEffect(() => {
     if (!authOpen || user.role !== 'admin') return;
@@ -351,17 +376,20 @@ export default function MapDashboard() {
   }, [authOpen, user.role]);
 
   useEffect(() => {
-    if (dataSource !== 'live' || !liveStationIds || (user.role === 'guest' && !shareKey)) return;
+    if (dataSource !== 'live' || !liveStationIds) return;
     let active = true;
     setHistoryLoadError(false);
-    Promise.all(liveStationIds.split(',').map(async (id) => {
-      const res = await fetch(`/api/history?stationId=${encodeURIComponent(id.toLowerCase())}`, { headers: { 'x-bayu-read-key': shareKey }, cache: 'no-store' });
+    Promise.allSettled(liveStationIds.split(',').map(async (id) => {
+      const res = await fetch(`/api/history?stationId=${encodeURIComponent(id.toLowerCase())}`, { cache: 'no-store' });
       if (!res.ok) throw new Error('Riwayat tidak tersedia');
       return (await res.json()).rows || [];
-    })).then((groups) => { if (active) dispatch({ type: 'load_history', rows: groups.flat() }); })
-      .catch(() => { if (active) setHistoryLoadError(true); });
+    })).then((groups) => {
+      if (!active) return;
+      dispatch({ type: 'load_history', rows: groups.flatMap((result) => result.status === 'fulfilled' ? result.value : []) });
+      setHistoryLoadError(groups.some((result) => result.status === 'rejected'));
+    });
     return () => { active = false; };
-  }, [dataSource, shareKey, liveStationIds, user.username, user.role]);
+  }, [dataSource, liveStationIds, user.username, user.role]);
 
   useEffect(() => {
     if (!soundAlert) return;
@@ -376,20 +404,40 @@ export default function MapDashboard() {
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 2600); return () => clearTimeout(timer); }, [toast]);
   useEffect(() => {
     function escape(event) {
-      if (event.key === 'Escape') {
-        dispatch({ type: 'select', index: null });
-        setListOpen(false);
-        setAuthOpen(false);
-        setStationFormOpen(false);
-        setRegistrationInfo(null);
-      }
+      if (event.key !== 'Escape') return;
+      if (registrationInfo) return; // Setup handles its own Escape and focus.
+      if (authOpen) setAuthOpen(false);
+      else if (stationFormOpen) setStationFormOpen(false);
+      else if (listOpen) { setListOpen(false); setSearch(''); }
+      else dispatch({ type: 'select', index: null });
     }
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
-  }, []);
+  }, [registrationInfo, authOpen, stationFormOpen, listOpen]);
 
-  const filtered = displayStations.map((s, index) => ({ ...s, index })).filter((s) => `${s.name} ${s.id}`.toLowerCase().includes(search.toLowerCase()));
-  function select(index) { dispatch({ type: 'select', index: stations.findIndex((s) => s.id === displayStations[index]?.id) }); setListOpen(false); setSearch(''); setTab('summary'); }
+  const modalOpen = authOpen || stationFormOpen;
+  useEffect(() => {
+    if (!modalOpen) return;
+    const previous = document.activeElement;
+    const dialog = dialogRef.current;
+    (dialog?.querySelector('input') || dialog?.querySelector('button'))?.focus();
+    return () => { if (previous?.isConnected) previous.focus(); };
+  }, [modalOpen, authMode]);
+
+  useEffect(() => {
+    if (panelBody.current) panelBody.current.scrollTop = 0;
+  }, [tab, station?.id, listOpen]);
+
+  const filtered = displayStations.map((s, index) => ({ ...s, index })).filter((s) => (user.role === 'guest' || stationFilter === 'all' || s.ownerId === user.username) &&
+    `${s.name} ${s.id}`.toLowerCase().includes(search.trim().toLowerCase()));
+  function select(index, nextTab = 'summary') {
+    const target = displayStations[index];
+    if (!target) return;
+    dispatch({ type: 'select', index: stations.findIndex((entry) => entry.id === target.id) });
+    setListOpen(false);
+    setSearch('');
+    setTab(nextTab);
+  }
   function close() { dispatch({ type: 'select', index: null }); setListOpen(false); }
 
   function openStationForm() {
@@ -409,30 +457,39 @@ export default function MapDashboard() {
     setStationBusy(true);
     try {
       const response = await fetch('/api/stations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(stationDraft) });
-      const data = await response.json();
+      const data = await readApiResponse(response);
       if (!response.ok) throw new Error(data.error || 'Pendaftaran gagal.');
-      await refreshRegistry();
       setRegistrationInfo({ ...data.station, topics: data.topics });
       dispatch({ type: 'toggle_source', source: 'live' });
       setStationFormOpen(false);
-      setToast('Stasiun tersimpan. Siapkan konfigurasi MQTT alat.');
+      setToast('Stasiun tersimpan. Siapkan koneksi MQTT alat.');
+      refreshRegistry().catch(() => setToast('Stasiun tersimpan. Muat ulang peta untuk melihatnya.'));
     } catch (error) { setStationError(error.message); }
     finally { setStationBusy(false); }
   }
 
-  function deleteStation() {
-    if (user.role !== 'admin' || !station?.custom || pendingCommand) return;
-    if (!window.confirm(`Hapus ${station.name} (${station.id}) dari daftar dan peta di browser ini? Data alat di server tetap tersimpan.`)) return;
+  async function deleteStation() {
+    if (!canManage || !station || pendingCommand || deletingStation) return;
+    const { id, name } = station;
+    if (!window.confirm(`Hapus "${name}" dari peta BAYU? Riwayat disimpan sebagai arsip. Pengelola perlu menonaktifkan akun MQTT perangkat secara terpisah di EMQX.`)) return;
+    setDeletingStation(true);
     try {
-      const remaining = stations.filter((s) => s.custom && s.id !== station.id);
-      localStorage.setItem('bayu-custom-stations', JSON.stringify(remaining.map(({ id, name, fallbackLat, fallbackLng }) => ({ id, name, lat: fallbackLat, lng: fallbackLng }))));
-      dispatch({ type: 'remove_station', id: station.id });
-      setCommandLogs((prev) => prev.filter((entry) => entry.stationId !== station.id));
-      setBuzzerMuted((prev) => { const next = { ...prev }; delete next[station.id]; return next; });
+      const response = await fetch(`/api/stations/${encodeURIComponent(id.toLowerCase())}`, { method: 'DELETE' });
+      const data = await readApiResponse(response);
+      if (!response.ok) throw new Error(data.error || 'Stasiun belum terhapus.');
+      dispatch({ type: 'remove_station', id });
+      setCommandLogs((logs) => logs.filter((entry) => entry.stationId !== id));
+      setBuzzerMuted((previous) => {
+        const next = { ...previous };
+        delete next[id];
+        return next;
+      });
       setTab('summary');
-      setToast(`${station.name} dihapus dari daftar stasiun.`);
-    } catch {
-      setToast('Stasiun belum dihapus karena penyimpanan browser tidak tersedia.');
+      setToast(`${name} dihapus dari peta.`);
+    } catch (error) {
+      setToast(error.message);
+    } finally {
+      setDeletingStation(false);
     }
   }
 
@@ -456,15 +513,22 @@ export default function MapDashboard() {
 
   async function handleAuthSubmit(event) {
     event.preventDefault();
+    if (authBusy) return;
+    setAuthBusy(true);
+    setAuthError('');
     try {
-      const res = await fetch('/api/auth', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: authUsername, password: authPassword }) });
+      const url = authMode === 'register' ? '/api/auth/register' : '/api/auth';
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: authName, username: authUsername, password: authPassword }) });
       const data = await readApiResponse(res);
       if (!res.ok) throw new Error(data.error || 'Login gagal.');
       dispatch({ type: 'set_user', user: data.user });
       setAuthOpen(false);
       setAuthPassword('');
+      setAuthMode('login');
       setToast(`Berhasil masuk sebagai ${data.user.name}.`);
-    } catch (error) { setToast(error.message); }
+    } catch (error) { setAuthError(error.message); }
+    finally { setAuthBusy(false); }
   }
 
   async function handleLogout() {
@@ -517,13 +581,13 @@ export default function MapDashboard() {
     setSettingsBusy(true);
     try {
       const config = { warningKmh: Number(warningThreshold), dangerKmh: Number(threshold),
-        batteryThreshold: Number(batteryThreshold), directionOffsetDeg: Number(directionOffset) };
+        directionOffsetDeg: Number(directionOffset) };
       const response = await fetch('/api/stations/' + station.id.toLowerCase(), {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error);
       dispatch({ type: 'station_settings', id: station.id, settings: data.settings });
-      dispatch({ type: 'settings', settings: { threshold: config.dangerKmh, batteryThreshold: config.batteryThreshold } });
+      dispatch({ type: 'settings', settings: { threshold: config.dangerKmh } });
       setToast('Pengaturan web tersimpan. Terapkan batas angin ke ESP untuk menyamakan alarm alat.');
     } catch (error) { setToast(error.message || 'Konfigurasi belum tersimpan.'); }
     finally { setSettingsBusy(false); }
@@ -591,7 +655,7 @@ export default function MapDashboard() {
       <button className="user-pill" onClick={() => setAuthOpen(true)} title="Kelola Akun & Akses" aria-label={user.role === 'guest' ? 'Masuk atau daftar akun' : 'Kelola akun'}>
         <Icon name="user" size={14} />
         <span>{user.role === 'guest' ? 'Masuk Akun' : user.name.split(' ')[0]}</span>
-        <span className={`role-badge ${user.role}`}>{user.role === 'admin' ? 'Admin' : user.role === 'guest' ? 'Tamu' : 'Pemilik'}</span>
+        <span className={`role-badge ${user.role}`}>{user.role === 'admin' ? 'Admin' : user.role === 'guest' ? 'Tamu' : 'Akun'}</span>
       </button>
 
       <div className="map-navigation" aria-label="Navigasi peta">
@@ -601,16 +665,16 @@ export default function MapDashboard() {
         </div>
         <button className="map-settings-button" aria-label="Buka pengaturan stasiun" title="Pengaturan stasiun" onClick={() => {
           if (user.role === 'guest') { setAuthOpen(true); return; }
-          if (!displayStations.length) { setToast('Daftarkan stasiun terlebih dahulu untuk mengatur alat.'); return; }
-          if (!station) select(0);
-          setListOpen(false); setTab('settings');
-        }}><Icon name="settings" size={20} /></button>
+          if (firstManageableIndex < 0) { openStationForm(); return; }
+          select(canManage ? validSelected : firstManageableIndex, 'settings');
+        }}><Icon name="settings" size={23} /></button>
       </div>
 
       {/* Auth Modal */}
-      {stationFormOpen && (
+      {stationFormOpen && user.role !== 'guest' && (
         <div className="auth-overlay" onClick={() => setStationFormOpen(false)}>
-          <section className="station-dialog" role="dialog" aria-modal="true" aria-labelledby="new-station-title" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => { if (e.key === 'Tab') { const fields = Array.from(e.currentTarget.querySelectorAll('button, input')); const first = fields[0], last = fields.at(-1); if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); } } }}>
+          <section ref={dialogRef} className="station-dialog" role="dialog" aria-modal="true" aria-labelledby="new-station-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={trapDialogFocus}>
             <div className="station-dialog-heading">
               <div><h2 id="new-station-title">Tambah stasiun</h2></div>
               <button type="button" className="plain-icon" aria-label="Tutup tambah stasiun" onClick={() => setStationFormOpen(false)}><Icon name="close" size={18} /></button>
@@ -632,16 +696,17 @@ export default function MapDashboard() {
       )}
       {authOpen && (
         <div className="auth-overlay" onClick={() => setAuthOpen(false)}>
-          <div className="auth-card" onClick={(e) => e.stopPropagation()}>
+          <div ref={dialogRef} className="auth-card" role="dialog" aria-modal="true" aria-labelledby="account-title"
+            onClick={(e) => e.stopPropagation()} onKeyDown={trapDialogFocus}>
             <div className="auth-header">
-              <h2>{user.role === 'admin' ? 'Kelola Akun' : user.role === 'guest' ? 'Masuk Akun' : 'Akun Saya'}</h2>
+              <h2 id="account-title">{user.role === 'admin' ? 'Kelola Akun' : user.role === 'guest' ? (authMode === 'register' ? 'Daftar akun' : 'Masuk akun') : 'Akun Saya'}</h2>
               <button className="auth-close" aria-label="Tutup akun" onClick={() => setAuthOpen(false)}>✕</button>
             </div>
 
             {user.role !== 'guest' ? (
               <div>
                 <p style={{ fontSize: '13px', color: '#475569', marginBottom: '14px' }}>
-                  Masuk sebagai <b>{user.name}</b> ({user.role === 'admin' ? 'Administrator' : 'Pemilik stasiun'}).
+                  Masuk sebagai <b>{user.name}</b> ({user.role === 'admin' ? 'Administrator' : 'Akun BAYU'}).
                 </p>
                 {user.role === 'admin' && <div className="user-management">
                   <h3>Akun {authStorageMode === 'local-demo' ? 'demo lokal' : 'tersimpan di Firestore'}</h3>
@@ -668,24 +733,26 @@ export default function MapDashboard() {
               </div>
             ) : (
               <>
-                <button type="button" className="auth-btn google-login" disabled={googleBusy} onClick={handleGoogleLogin}>{googleBusy ? 'Menghubungkan Google…' : 'Masuk / Daftar dengan Google'}</button>
-                <p className="auth-hint">Google dapat digunakan untuk masuk atau mendaftar. Login username memakai akun BAYU yang sudah dibuat pengelola.</p>
-                <div className="password-login"><div className="login-divider"><span>atau gunakan akun BAYU</span></div><form className="auth-form" onSubmit={handleAuthSubmit}>
-                  <label>Username
-                    <input required placeholder="Username akun BAYU" autoComplete="username" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} />
-                  </label>
-                  <label>Password
-                    <input type="password" required autoComplete="current-password" placeholder="Password akun" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} />
-                  </label>
-                  <button type="submit" className="auth-btn">Masuk ke Sistem</button>
-                </form></div>
+                <form className="auth-form" onSubmit={handleAuthSubmit}>
+                  {authMode === 'register' && <label>Nama<input required maxLength={80} autoComplete="name" value={authName} onChange={(e) => setAuthName(e.target.value)} /></label>}
+                  <label>Username<input required minLength={3} maxLength={32} autoComplete="username" value={authUsername} onChange={(e) => setAuthUsername(e.target.value)} /></label>
+                  <label>Password<input type="password" required maxLength={128} minLength={authMode === 'register' ? 12 : undefined}
+                    autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} /></label>
+                  {authMode === 'register' && <p className="auth-hint">Gunakan minimal 12 karakter untuk password.</p>}
+                  {authError && <p className="setup-error" role="alert">{authError}</p>}
+                  <button type="submit" className="auth-btn" disabled={authBusy || googleBusy}>{authBusy ? 'Memproses…' : authMode === 'register' ? 'Buat akun' : 'Masuk'}</button>
+                </form>
+                <div className="login-divider"><span>atau</span></div>
+                <button type="button" className="auth-btn google-login" disabled={googleBusy || authBusy} onClick={handleGoogleLogin}>{googleBusy ? 'Menghubungkan Google…' : 'Lanjut dengan Google'}</button>
+                <p className="auth-mode-switch">{authMode === 'register' ? 'Sudah punya akun?' : 'Belum punya akun?'} <button type="button" disabled={authBusy || googleBusy}
+                  onClick={() => { setAuthMode(authMode === 'register' ? 'login' : 'register'); setAuthError(''); setAuthPassword(''); }}>{authMode === 'register' ? 'Masuk' : 'Daftar'}</button></p>
               </>
             )}
           </div>
         </div>
       )}
 
-      {registrationInfo && <StationSetupDialog station={registrationInfo}
+      {registrationInfo && user.role !== 'guest' && <StationSetupDialog station={registrationInfo}
         online={Boolean(stations.find((entry) => entry.id.toLowerCase() === registrationInfo.id.toLowerCase())?.online)}
         onClose={closeSetup} />}
 
@@ -693,7 +760,7 @@ export default function MapDashboard() {
         <section className="map-welcome" aria-labelledby="welcome-title">
           <div className="welcome-wind"><Icon name="wind" size={28} /></div>
           <h1 id="welcome-title">{user.role === 'guest' ? 'Pantau angin dari stasiunmu' : 'Stasiun pertamamu dimulai di sini'}</h1>
-          <p>{user.role === 'guest' ? 'Masuk untuk melihat alat, membaca kondisi angin, dan mengatur peringatan.' : 'Beri nama stasiun, tentukan lokasi, lalu dapatkan kode lengkap untuk kedua ESP32.'}</p>
+          <p>{user.role === 'guest' ? 'Stasiun publik akan tampil di peta saat tersedia. Masuk untuk mendaftarkan dan mengatur alat.' : 'Beri nama stasiun, tentukan lokasi, lalu siapkan koneksi dan format kirim data alat.'}</p>
           <button className="primary-button" onClick={() => user.role === 'guest' ? setAuthOpen(true) : openStationForm()}>{user.role === 'guest' ? 'Masuk akun' : 'Daftarkan stasiun'}</button>
         </section>
       )}
@@ -713,16 +780,16 @@ export default function MapDashboard() {
           <label htmlFor="station-search" className="sr-only">Cari stasiun</label>
           <input id="station-search" placeholder="Cari stasiun angin" autoComplete="off" value={search} onFocus={() => setListOpen(true)} onChange={(event) => { setSearch(event.target.value); setListOpen(true); }} />
         </div>
-        <button className="plain-icon" aria-label={listOpen ? 'Tutup daftar stasiun' : 'Buka daftar stasiun'} onClick={() => setListOpen((value) => !value)}>
+        <button className="plain-icon" aria-label={listOpen ? 'Sembunyikan hasil pencarian' : 'Lihat hasil pencarian'} aria-expanded={listOpen} onClick={() => { setListOpen(!listOpen); if (listOpen) setSearch(''); }}>
           <Icon name={listOpen ? 'close' : 'search'} />
         </button>
         <button className="plain-icon add-station-shortcut" aria-label="Tambah stasiun" title="Tambah stasiun" onClick={openStationForm}><Icon name="plus" size={19} /></button>
       </div>
 
-      {!station && !listOpen && (
+      {!listOpen && (
         <div className="location-chip">
-          <button className="station-switcher" aria-expanded={listOpen} aria-label="Buka daftar stasiun" onClick={() => setListOpen(true)}>
-            <Icon name="radio" size={17} /><span className="station-switcher-label">Stasiun saya</span><span className="station-count">{displayStations.length}</span><Icon name="chevron" size={16} />
+          <button className="station-switcher" aria-expanded={listOpen} aria-label="Buka daftar stasiun" onClick={() => { setStationFilter('all'); setListOpen(true); }}>
+            <Icon name="radio" size={17} /><span className="station-switcher-label">Stasiun</span><span className="station-count">{displayStations.length}</span><Icon name="chevron" size={16} />
           </button>
         </div>
       )}
@@ -737,22 +804,27 @@ export default function MapDashboard() {
       {listOpen && (
         <aside className="station-list" aria-label="Daftar stasiun">
           <div className="list-heading">
-            <span>{dataSource === 'live' ? 'Stasiun pemantauan' : 'Stasiun di sekitar Babarsari'}</span>
-            <small>{filtered.length} hasil</small>
+            <span>Daftar stasiun</span>
+            <button type="button" className="plain-icon" aria-label="Tutup daftar stasiun"
+              onClick={() => { setListOpen(false); setSearch(''); }}><Icon name="close" size={16} /></button>
           </div>
+          {user.role !== 'guest' && <div className="station-directory-filter" aria-label="Filter stasiun">
+            <button aria-pressed={stationFilter === 'all'} onClick={() => setStationFilter('all')}>Semua</button>
+            <button aria-pressed={stationFilter === 'owned'} onClick={() => setStationFilter('owned')}>Milik saya</button>
+          </div>}
           {filtered.map((s) => (
             <button className="station-result" key={s.id} onClick={() => select(s.index)}>
               <span className={`station-dot ${state(s, settings)}`}>↑</span>
               <span className="result-text">
                 <b>{s.name}</b>
-                <small>{s.id} · {stateLabel(s, settings)} {s.source === 'mqtt' ? '· IoT' : ''}</small>
+                <small>{s.ownerId === user.username ? 'Milik saya' : !s.ownerId ? 'Publik' : s.id} · {stateLabel(s, settings)}</small>
               </span>
               <span className="result-speed">{s.online ? format(s.speed) : '—'}<small>km/jam</small></span>
             </button>
           ))}
-          {!filtered.length && <p className="no-results">Stasiun tidak ditemukan.</p>}
+          {!filtered.length && <p className="no-results">{!search && stationFilter === 'owned' && user.role !== 'guest' ? 'Belum ada stasiun di akun ini.' : 'Stasiun tidak ditemukan.'}</p>}
           <button className="add-station-row" onClick={openStationForm}><Icon name="plus" size={17} /><span>Tambah stasiun</span><Icon name="chevron" size={14} /></button>
-          <div className="list-footnote">{dataSource === 'live' ? `${displayStations.length} stasiun terdaftar · Pembacaan langsung dari alat` : 'Mode simulasi · Beralih ke Live IoT untuk alat riil'}</div>
+          <div className="list-footnote">{filtered.length} stasiun</div>
         </aside>
       )}
 
@@ -781,7 +853,6 @@ export default function MapDashboard() {
           <div className="panel-actions">
             <button onClick={() => setFocusRequest((v) => v + 1)}><Icon name="locate" size={17} />Fokus lokasi</button>
             <button onClick={download}><Icon name="download" size={17} />Unduh CSV</button>
-            {station.custom && !station.registered && user.role === 'admin' && <button className="delete-station-btn" aria-label="Hapus stasiun" title="Hapus stasiun" disabled={Boolean(pendingCommand)} onClick={deleteStation}><Icon name="trash" size={17} />Hapus</button>}
           </div>
 
           <nav className="detail-tabs" aria-label="Detail stasiun">
@@ -790,23 +861,23 @@ export default function MapDashboard() {
               ['history', 'Riwayat'],
               ['control', 'Kontrol Alat'],
               ['settings', 'Pengaturan'],
-            ].map(([id, title]) => (
+            ].filter(([id]) => canManage || id === 'summary' || id === 'history').map(([id, title]) => (
               <button className={tab === id ? 'active' : ''} aria-current={tab === id ? 'page' : undefined} key={id} onClick={() => setTab(id)}>
                 {title}
               </button>
             ))}
           </nav>
 
-          <div className="panel-body">
+          <div className="panel-body" ref={panelBody}>
             {tab === 'summary' && (
               <>
                 <section className="wind-stat">
                   <div className="stat-label">Kecepatan angin{!station.online && <span>{station.updated ? 'Data terakhir' : 'Belum ada pembacaan'}</span>}</div>
-                  <div className="speed-number">{format(station.speed)}<span>km/jam</span></div>
-                  <div className="speed-secondary">{format(station.speed / 3.6)} m/s <span>·</span> {station.speed >= (station.settings?.dangerKmh ?? settings.threshold) ? 'Melewati ambang alarm' : 'Di bawah ambang alarm'}</div>
+                  <div className="speed-number">{station.updated ? format(station.speed) : '—'}<span>km/jam</span></div>
+                  {station.updated > 0 && <div className="speed-secondary">{format(station.speed / 3.6)} m/s <span>·</span> {station.speed >= (station.settings?.dangerKmh ?? settings.threshold) ? 'Melewati ambang alarm' : 'Di bawah ambang alarm'}</div>}
                 </section>
 
-                <section className="direction-stat">
+                {station.updated > 0 && <section className="direction-stat">
                   <div className="compass" role="img" aria-label={`Arah asal angin ${direction(station.angle)}, ${degrees(station.angle)} derajat`}>
                     <span className="north">U</span>
                     <span className="east">T</span>
@@ -825,10 +896,10 @@ export default function MapDashboard() {
                     <h2>{direction(station.angle)}</h2>
                     <p>{degrees(station.angle)}° dari utara</p>
                   </div>
-                </section>
+                </section>}
 
                 {/* Weather Comparison Widget */}
-                {externalWeather && (
+                {externalWeather && station.online && station.updated > 0 && (
                   <div className="weather-box">
                     <div className="weather-title">
                       <span>Komparasi Prakiraan DIY</span>
@@ -848,7 +919,7 @@ export default function MapDashboard() {
                 )}
 
                 {/* Device Diagnostics & Health */}
-                <div className="health-box">
+                {canManage && <div className="health-box">
                   <div className="health-title">
                     <span>Diagnostik Kesehatan Alat</span>
                       <small>{station.source === 'mqtt' ? 'Nilai dari telemetri alat' : 'Belum ada telemetri alat'}</small>
@@ -879,10 +950,9 @@ export default function MapDashboard() {
                       <b>{deviceHealth.gpsStatus}</b>
                     </div>
                   </div>
-                </div>
+                </div>}
 
                 <dl className="device-details">
-                  <div><dt>Baterai luar</dt><dd>{Number.isFinite(station.battery) ? <><span className="battery-icon"><i style={{ width: `${station.battery}%`, background: station.battery <= settings.batteryThreshold ? '#cb9227' : '#39826d' }} /></span>{station.battery}%</> : 'Belum tersedia'}</dd></div>
                   <div><dt>Hubungan jaringan</dt><dd>{station.online ? 'Terhubung' : 'Terputus'}</dd></div>
                   <div><dt>Ambang alarm</dt><dd>{station.settings?.dangerKmh ?? settings.threshold} km/jam</dd></div>
                   {station.directionBackendFresh === false && <div><dt>Koreksi ke LCD</dt><dd>Menunggu balasan backend; LCD memakai arah terakhir.</dd></div>}
@@ -909,8 +979,8 @@ export default function MapDashboard() {
                 </section>
 
                 <section className="coordinates">
-                  <span>Koordinat stasiun</span>
-                  <p>{station.lat.toFixed(6)}, {station.lng.toFixed(6)}</p>
+                  <span>{canManage ? "Koordinat stasiun" : "Perkiraan lokasi"}</span>
+                  <p>{station.lat.toFixed(canManage ? 6 : 3)}, {station.lng.toFixed(canManage ? 6 : 3)}</p>
                 </section>
               </>
             )}
@@ -919,7 +989,7 @@ export default function MapDashboard() {
               <section className="history-section">
                 <h2>Riwayat & Analitik</h2>
                 <p>{dataSource === 'live' ? 'Riwayat tersimpan di Firestore dan pembacaan terbaru dari alat.' : 'Selama sesi halaman ini dibuka.'}</p>
-                {dataSource === 'live' && historyLoadError && <p role="status">Riwayat tersimpan belum bisa dimuat. Data yang tampil hanya dari sesi ini; periksa kredensial Firebase pada server.</p>}
+                {dataSource === 'live' && historyLoadError && <p role="status">Riwayat tersimpan belum bisa dimuat. Data yang tersedia berasal dari sesi ini.</p>}
 
                 <div className="stats-grid">
                   <div className="stat-card">
@@ -974,7 +1044,7 @@ export default function MapDashboard() {
               </section>
             )}
 
-            {tab === 'control' && (
+            {tab === 'control' && canManage && (
               <section className="control-box">
                 <div className="control-heading"><div><span className="section-eyebrow">AKSES PERANGKAT</span><h2>Kontrol stasiun</h2></div><span className={`connection-pill ${dataSource === 'live' && station.online ? 'connected' : ''}`}><i />{station.online ? 'Terhubung' : 'Offline'}</span></div>
                 <p className="control-intro">Kelola sensor dan alarm pada {station.id}.</p>
@@ -993,17 +1063,18 @@ export default function MapDashboard() {
               </section>
             )}
 
-            {tab === 'settings' && <StationSettings key={station.id} station={station} canManage={canManage}
+            {tab === 'settings' && canManage && <StationSettings key={station.id} station={station} canManage={canManage}
               warningThreshold={warningThreshold} setWarningThreshold={setWarningThreshold} threshold={threshold} setThreshold={setThreshold}
-              batteryThreshold={batteryThreshold} setBatteryThreshold={setBatteryThreshold} directionOffset={directionOffset} setDirectionOffset={setDirectionOffset}
+              directionOffset={directionOffset} setDirectionOffset={setDirectionOffset}
               soundAlert={soundAlert} onSound={() => dispatch({type:'toggle_sound'})} onSave={saveSettings} saving={settingsBusy}
               pendingCommand={pendingCommand} onApply={() => sendDownlink('apply_settings')}
               onLocationSaved={(location) => dispatch({type:'station_location',id:station.id,location})}
-              onSetup={() => setRegistrationInfo({...station,id:station.id.toLowerCase()})} />}
+              onSetup={() => setRegistrationInfo({...station,id:station.id.toLowerCase()})}
+              onDelete={deleteStation} deleting={deletingStation} />}
 
 
             <p className="panel-disclosure">
-              {dataSource === 'live' ? station.source === 'mqtt' ? 'Pembacaan diterima langsung dari alat. Lokasi mengikuti GPS atau koordinat cadangan.' : 'Menunggu pembacaan pertama dari alat. Peta menampilkan koordinat cadangan.' : 'Menunggu data alat.'}
+              {dataSource === 'live' ? station.source === 'mqtt' ? (canManage ? 'Lokasi mengikuti GPS alat atau koordinat cadangan.' : 'Peta publik menampilkan perkiraan lokasi stasiun.') : 'Menunggu pembacaan pertama dari alat. Peta menampilkan koordinat cadangan.' : 'Menunggu data alat.'}
             </p>
           </div>
         </aside>
@@ -1011,7 +1082,7 @@ export default function MapDashboard() {
 
       <div className="map-key">
         <span><i className="key-normal" />Normal</span>
-        <span><i className="key-warning" />Baterai lemah</span>
+        <span><i className="key-warning" />Angin sedang</span>
         <span><i className="key-alarm" />Alarm angin</span>
         <span><i className="key-offline" />Terputus</span>
         <span className="direction-note">↑ Arah asal angin</span>

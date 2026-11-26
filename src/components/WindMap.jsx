@@ -16,7 +16,10 @@ function icon(station, index, selected, settings) {
 function centerOnStation(map, station, zoom = map.getZoom()) {
   if (!map || !station) return;
   const mobile = map.getSize().x <= 760;
-  const offset = mobile ? L.point(0, map.getSize().y * .25) : L.point(-220, 0);
+  const root = map.getContainer().closest('.map-app');
+  const desktopPanel = root?.querySelector('.station-panel');
+  const offset = mobile ? L.point(0, map.getSize().y * .25)
+    : L.point(desktopPanel ? -desktopPanel.getBoundingClientRect().right / 2 : 0, 0);
   const center = map.unproject(map.project([station.lat, station.lng], zoom).add(offset), zoom);
   map.setView(center, zoom, { animate: true });
 }
@@ -117,9 +120,13 @@ export default function WindMap({ stations, selected, settings, onSelect, onClea
 
   // Center / Focus on selected station (hanya geser kamera saat posisi koordinat GPS berubah atau saat user klik fokus)
   useEffect(() => {
+    if (selected === null) {
+      lastCenterCoordRef.current = null;
+      return;
+    }
     if (selected !== null && mapRef.current && stations[selected]) {
       const s = stations[selected];
-      const key = `${s.lat.toFixed(5)},${s.lng.toFixed(5)}`;
+      const key = s.id;
       if (lastCenterCoordRef.current !== key) {
         lastCenterCoordRef.current = key;
         centerOnStation(mapRef.current, s);
@@ -127,8 +134,10 @@ export default function WindMap({ stations, selected, settings, onSelect, onClea
     }
   }, [selected, stations]);
 
+  const handledFocusRef = useRef(0);
   useEffect(() => {
-    if (focusRequest && selected !== null && mapRef.current && stations[selected]) {
+    if (focusRequest !== handledFocusRef.current && selected !== null && mapRef.current && stations[selected]) {
+      handledFocusRef.current = focusRequest;
       centerOnStation(mapRef.current, stations[selected], 17);
     }
   }, [focusRequest, selected, stations]);

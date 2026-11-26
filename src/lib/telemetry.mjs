@@ -11,7 +11,7 @@ export function stationSource(station) {
 
 export function validReading(id, value) {
   if (!value || value.stationId !== id) return null;
-  const { windSpeedKmh, windDirectionDeg, receivedAt, gps, lat, lon, lng, rssi, uptime_s, heap_kb, packet_id, is_muted, battery } = value;
+  const { windSpeedKmh, windDirectionDeg, receivedAt, gps, lat, lon, lng, rssi, uptime_s, heap_kb, packet_id, is_muted } = value;
   if (!Number.isFinite(windSpeedKmh) || windSpeedKmh < 0 ||
       !Number.isFinite(windDirectionDeg) || windDirectionDeg < 0 || windDirectionDeg >= 360 ||
       !Number.isFinite(receivedAt) || receivedAt <= 0) return null;
@@ -36,7 +36,6 @@ export function validReading(id, value) {
     ...(Number.isFinite(heap_kb) ? { heap_kb } : {}),
     ...(Number.isFinite(packet_id) ? { packet_id } : {}),
     ...(typeof is_muted === 'boolean' ? { is_muted } : {}),
-    ...(Number.isFinite(battery) && battery >= 0 && battery <= 100 ? { battery } : {}),
   };
 }
 
@@ -58,7 +57,6 @@ export function displayStations(simulated, readings, now) {
       angle: input.windDirectionDeg,
       updated: input.receivedAt,
       online: now - input.receivedAt <= 30_000,
-      battery: null,
       samples: [],
     };
   });

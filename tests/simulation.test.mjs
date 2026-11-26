@@ -68,10 +68,11 @@ test('removing a custom station preserves other selections and protects built-in
   assert.equal(model.stations.length, 7);
 });
 
-test('alarm threshold is inclusive and takes priority over low battery', () => {
+test('alarm threshold is inclusive and legacy battery readings do not change status', () => {
   const station = { ...createStations()[0], speed: 40, battery: 5 };
   assert.equal(state(station, DEFAULT_SETTINGS), 'alarm');
-  assert.equal(state({ ...station, speed: 39.9 }, DEFAULT_SETTINGS), 'warning');
+  assert.equal(state({ ...station, speed: 39.9 }, DEFAULT_SETTINGS), 'normal');
+  assert.equal(state({ ...station, speed: 10, settings: { warningKmh: 5, dangerKmh: 15 } }, DEFAULT_SETTINGS), 'wind-warning');
 });
 test('offline stations retain last measurement and timestamp', () => {
   const stations = createStations(1000000);
@@ -87,7 +88,6 @@ test('scenario changes apply to the selected station without mutating source', (
   const offline = applyScenario(station, 'offline', DEFAULT_SETTINGS, 1000000);
   assert.equal(offline.online, false);
   assert.equal(station.online, true);
-  assert.equal(state(applyScenario(station, 'battery', DEFAULT_SETTINGS, 1000000), DEFAULT_SETTINGS), 'warning');
   assert.equal(state(applyScenario(station, 'alarm', DEFAULT_SETTINGS, 1000000), DEFAULT_SETTINGS), 'alarm');
 });
 test('direction wraps correctly across north and negative angles', () => {
@@ -174,7 +174,7 @@ test('CSV correctly marks HARDWARE_REAL for mqtt source rows', () => {
   };
   const csv = exportCsv([hardwareRecord]);
   assert.match(csv, /HARDWARE_REAL/);
-  assert.match(csv, /24.50,180.0,100,-7.7801,110.4199,HARDWARE_REAL/);
+  assert.match(csv, /24.50,180.0,-7.7801,110.4199,HARDWARE_REAL/);
 });
 
 test('calculateStats handles multi-direction distribution correctly', () => {

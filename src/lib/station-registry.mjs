@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { getFirestore } from 'firebase-admin/firestore';
 import { getDashboardAdminApp } from './firebase-admin.js';
 
-export const defaultStationSettings = { warningKmh: 5, dangerKmh: 15, batteryThreshold: 20, directionOffsetDeg: 0 };
+export const defaultStationSettings = { warningKmh: 5, dangerKmh: 15, directionOffsetDeg: 0 };
 
 export function normalizeStationId(value) {
   const id = typeof value === 'string' ? value.toLowerCase().trim() : '';
@@ -14,32 +14,77 @@ export function validateStationSettings(value) {
   const keys = Object.keys(defaultStationSettings);
   if (!value || keys.some((key) => !Number.isFinite(value[key])) ||
       value.warningKmh < 0 || value.dangerKmh <= value.warningKmh || value.dangerKmh > 200 ||
-      value.batteryThreshold < 1 || value.batteryThreshold > 50 ||
       Math.abs(value.directionOffsetDeg) > 360) throw new Error('Ambang dan koreksi arah tidak valid.');
   return Object.fromEntries(keys.map((key) => [key, value[key]]));
 }
 
 export function canManageStation(user, station) {
-  return Boolean(user && (user.role === 'admin' || station?.ownerId === user.username));
+  return Boolean(user && !station?.deletedAt && (user.role === 'admin' || station?.ownerId === user.username));
 }
 
 function collection() { return getFirestore(getDashboardAdminApp()).collection('stationRegistry'); }
 
-export async function getStation(id) {
+export async function getStationEntry(id) {
   const snapshot = await collection().doc(id).get();
-  return snapshot.exists ? { id: snapshot.id, ...snapshot.data() } : null;
+  return snapshot.exists ? { ...snapshot.data(), id: snapshot.id } : null;
+}
+
+export async function getStation(id) {
+  const station = await getStationEntry(id);
+  return station?.deletedAt ? null : station;
+}
+
+export async function archiveStation(id, user) {
+  return getFirestore(getDashboardAdminApp()).runTransaction(async (transaction) => {
+    const ref = collection().doc(id);
+    const snapshot = await transaction.get(ref);
+    const station = snapshot.data();
+    if (!snapshot.exists || (station.ownerId !== user.username && user.role !== 'admin')) return false;
+    // Keep the ID reserved so old device credentials cannot attach to a new registration.
+    if (!station.deletedAt) {
+      const now = Date.now();
+      transaction.update(ref, { deletedAt: now, updatedAt: now, calibrationDraft: null });
+    }
+    return true;
+  });
+}
+
+function publicStationIds() {
+  return [...new Set((process.env.BAYU_PUBLIC_STATION_IDS ?? 'bayu-b24af944b173931c')
+    .split(',').map(normalizeStationId).filter(Boolean))].slice(0, 20);
+}
+
+export function isPublicStation(station) {
+  return Boolean(station && !station.deletedAt && publicStationIds().includes(station.id));
+}
+
+export function publicStation(station) {
+  return { id: station.id, name: station.name,
+    lat: Number(station.lat.toFixed(3)), lng: Number(station.lng.toFixed(3)),
+    settings: { ...defaultStationSettings, warningKmh: station.settings?.warningKmh ?? 5,
+      dangerKmh: station.settings?.dangerKmh ?? 15 } };
+}
+
+export async function listVisibleStations(user) {
+  const owned = user ? await listStations(user) : [];
+  const featured = await Promise.all(publicStationIds().filter(id => !owned.some(station => station.id === id)).map(getStation));
+  return [...owned, ...featured.filter(station => station && Number.isFinite(station.lat) && Number.isFinite(station.lng)).map(publicStation)];
 }
 
 export async function listStations(user) {
   const query = user.role === 'admin' ? collection() : collection().where('ownerId', '==', user.username);
   const snapshot = await query.get();
-  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  return snapshot.docs.flatMap((doc) => {
+    const data = doc.data();
+    return data.deletedAt ? [] : [{ ...data, id: doc.id }];
+  });
 }
 
 export async function registerStation(user, input) {
   const name = typeof input.name === 'string' ? input.name.trim() : '';
-  const lat = Number(input.lat), lng = Number(input.lng);
-  if (!name || name.length > 80 || input.lat === '' || input.lng === '' ||
+  const coordinate = (value) => typeof value === 'number' || (typeof value === 'string' && value.trim()) ? Number(value) : NaN;
+  const lat = coordinate(input.lat), lng = coordinate(input.lng);
+  if (!name || name.length > 80 ||
       !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lng) || Math.abs(lng) > 180) {
     throw new Error('Nama atau koordinat tidak valid.');
   }
